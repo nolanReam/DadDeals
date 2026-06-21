@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>{{ product.name }}</h1>
+        <p class="muted">Product tracker details</p>
+    </div>
+    <div class="button-row">
+        <a class="secondary-button" href="{{ url_for('edit_product', product_id=product.id) }}">Edit</a>
+        <a class="small-button" href="{{ url_for('dashboard') }}">Dashboard</a>
+    </div>
+</section>
+
+<section class="panel">
+    <dl class="details">
+        <div>
+            <dt>Product page</dt>
+            <dd><a href="{{ product.url }}" target="_blank" rel="noopener">Open product page</a></dd>
+        </div>
+        <div>
+            <dt>Target price</dt>
+            <dd>{{ "$%.2f"|format(product.target_price) if product.target_price is not none else "Not set" }}</dd>
+        </div>
+        <div>
+            <dt>Big drop percent</dt>
+            <dd>{{ "%.1f%%"|format(product.big_drop_percent) if product.big_drop_percent is not none else "Not set" }}</dd>
+        </div>
+        <div>
+            <dt>Status</dt>
+            <dd><span class="status {{ product.status }}">{{ product.status|title }}</span></dd>
+        </div>
+        <div>
+            <dt>Target alerts</dt>
+            <dd>{{ "On" if product.notify_on_target else "Off" }}</dd>
+        </div>
+        <div>
+            <dt>Big drop alerts</dt>
+            <dd>{{ "On" if product.notify_on_big_drop else "Off" }}</dd>
+        </div>
+    </dl>
+</section>
+
+<section class="section">
+    <h2>Future Price History</h2>
+    <div class="placeholder">Price history will appear here in a later phase.</div>
+</section>
+
+<section class="section">
+    <h2>Future Source Checks</h2>
+    <div class="placeholder">Store checks and page source notes will appear here later.</div>
+</section>
+{% endblock %}

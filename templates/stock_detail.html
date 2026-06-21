@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>{{ stock.ticker }}</h1>
+        <p class="muted">{{ stock.company_name }}</p>
+    </div>
+    <div class="button-row">
+        <a class="secondary-button" href="{{ url_for('edit_stock', stock_id=stock.id) }}">Edit</a>
+        <a class="small-button" href="{{ url_for('dashboard') }}">Dashboard</a>
+    </div>
+</section>
+
+<section class="panel">
+    <dl class="details">
+        <div>
+            <dt>Target price</dt>
+            <dd>{{ "$%.2f"|format(stock.target_price) if stock.target_price is not none else "Not set" }}</dd>
+        </div>
+        <div>
+            <dt>Daily drop percent</dt>
+            <dd>{{ "%.1f%%"|format(stock.daily_drop_percent) if stock.daily_drop_percent is not none else "Not set" }}</dd>
+        </div>
+        <div>
+            <dt>Daily rise percent</dt>
+            <dd>{{ "%.1f%%"|format(stock.daily_rise_percent) if stock.daily_rise_percent is not none else "Not set" }}</dd>
+        </div>
+        <div>
+            <dt>Status</dt>
+            <dd><span class="status {{ stock.status }}">{{ stock.status|title }}</span></dd>
+        </div>
+        <div>
+            <dt>Target alerts</dt>
+            <dd>{{ "On" if stock.notify_on_target else "Off" }}</dd>
+        </div>
+        <div>
+            <dt>Big drop alerts</dt>
+            <dd>{{ "On" if stock.notify_on_big_drop else "Off" }}</dd>
+        </div>
+    </dl>
+</section>
+
+<section class="section">
+    <h2>Future Price History</h2>
+    <div class="placeholder">Stock price history will appear here in a later phase.</div>
+</section>
+{% endblock %}

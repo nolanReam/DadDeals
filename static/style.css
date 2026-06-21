@@ -1,0 +1,320 @@
+:root {
+    color-scheme: light;
+    --bg: #f7f5ef;
+    --text: #1f2933;
+    --muted: #64748b;
+    --panel: #ffffff;
+    --line: #d9dee7;
+    --primary: #176b87;
+    --primary-dark: #0f4f64;
+    --secondary: #f1f5f9;
+    --danger: #b42318;
+    --success-bg: #e8f6ee;
+    --success-text: #17663a;
+    --error-bg: #fff0ed;
+    --error-text: #9f1d12;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 17px;
+    line-height: 1.5;
+}
+
+a {
+    color: var(--primary);
+}
+
+.site-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    background: #fffaf0;
+    border-bottom: 1px solid var(--line);
+}
+
+.brand {
+    color: var(--text);
+    font-size: 1.3rem;
+    font-weight: 800;
+    text-decoration: none;
+}
+
+.page {
+    width: min(100%, 980px);
+    margin: 0 auto;
+    padding: 18px 14px 40px;
+}
+
+.hero,
+.panel,
+.section,
+.danger-zone {
+    margin-bottom: 18px;
+}
+
+.hero {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.panel,
+.card,
+.empty-state,
+.placeholder,
+.danger-zone {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+}
+
+.panel,
+.empty-state,
+.placeholder,
+.danger-zone {
+    padding: 18px;
+}
+
+.narrow {
+    max-width: 440px;
+    margin: 36px auto;
+}
+
+h1,
+h2,
+h3,
+p {
+    margin-top: 0;
+}
+
+h1 {
+    margin-bottom: 4px;
+    font-size: 2rem;
+    line-height: 1.15;
+}
+
+h2 {
+    font-size: 1.35rem;
+}
+
+h3 {
+    margin-bottom: 6px;
+    font-size: 1.08rem;
+}
+
+.muted {
+    color: var(--muted);
+}
+
+.button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+}
+
+button,
+.primary-button,
+.secondary-button,
+.small-button,
+.danger-button {
+    display: inline-flex;
+    min-height: 46px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 8px;
+    padding: 11px 16px;
+    font: inherit;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.primary-button {
+    background: var(--primary);
+    color: white;
+}
+
+.primary-button:hover {
+    background: var(--primary-dark);
+}
+
+.secondary-button,
+.small-button {
+    background: var(--secondary);
+    color: var(--text);
+    border: 1px solid var(--line);
+}
+
+.small-button {
+    min-height: 40px;
+    padding: 8px 12px;
+    font-size: 0.95rem;
+}
+
+.danger-button {
+    background: var(--danger);
+    color: white;
+}
+
+.card-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.card {
+    padding: 16px;
+}
+
+.card-top {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.status {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 4px 9px;
+    background: #eef2f7;
+    color: #334155;
+    font-size: 0.82rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.status.active {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status.paused {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.stack {
+    display: grid;
+    gap: 14px;
+}
+
+label {
+    display: grid;
+    gap: 6px;
+    font-weight: 750;
+}
+
+input,
+select {
+    width: 100%;
+    min-height: 48px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: white;
+    color: var(--text);
+    font: inherit;
+}
+
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 650;
+}
+
+.check-row input {
+    width: 22px;
+    min-height: 22px;
+}
+
+.details {
+    display: grid;
+    gap: 12px;
+    margin: 0;
+}
+
+.details div {
+    display: grid;
+    gap: 2px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+}
+
+.details div:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+
+dt {
+    color: var(--muted);
+    font-weight: 800;
+}
+
+dd {
+    margin: 0;
+}
+
+.flash-list {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.flash {
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-weight: 750;
+}
+
+.flash.success {
+    background: var(--success-bg);
+    color: var(--success-text);
+}
+
+.flash.error {
+    background: var(--error-bg);
+    color: var(--error-text);
+}
+
+.danger-zone {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+@media (min-width: 720px) {
+    .page {
+        padding: 28px 20px 56px;
+    }
+
+    .hero {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .card-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .details {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

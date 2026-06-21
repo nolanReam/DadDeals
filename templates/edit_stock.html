@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <h1>Edit Stock</h1>
+    <form class="stack" method="post">
+        <label>
+            Company name
+            <input name="company_name" value="{{ stock.company_name }}" required>
+        </label>
+        <label>
+            Ticker
+            <input name="ticker" value="{{ stock.ticker }}" required maxlength="12">
+        </label>
+        <label>
+            Target price
+            <input type="number" step="0.01" min="0" name="target_price" value="{{ stock.target_price if stock.target_price is not none }}">
+        </label>
+        <label>
+            Daily drop percent
+            <input type="number" step="0.1" min="0" name="daily_drop_percent" value="{{ stock.daily_drop_percent if stock.daily_drop_percent is not none }}">
+        </label>
+        <label>
+            Daily rise percent
+            <input type="number" step="0.1" min="0" name="daily_rise_percent" value="{{ stock.daily_rise_percent if stock.daily_rise_percent is not none }}">
+        </label>
+        <label class="check-row">
+            <input type="checkbox" name="notify_on_target" {% if stock.notify_on_target %}checked{% endif %}>
+            Tell me when it reaches the target price
+        </label>
+        <label class="check-row">
+            <input type="checkbox" name="notify_on_big_drop" {% if stock.notify_on_big_drop %}checked{% endif %}>
+            Tell me when there is a big daily drop
+        </label>
+        <label>
+            Status
+            <select name="status">
+                <option value="active" {% if stock.status == "active" %}selected{% endif %}>Active</option>
+                <option value="paused" {% if stock.status == "paused" %}selected{% endif %}>Paused</option>
+            </select>
+        </label>
+        <div class="button-row">
+            <button class="primary-button" type="submit">Save Changes</button>
+            <a class="secondary-button" href="{{ url_for('stock_detail', stock_id=stock.id) }}">Cancel</a>
+        </div>
+    </form>
+</section>
+
+<section class="danger-zone">
+    <form action="{{ url_for('toggle_stock', stock_id=stock.id) }}" method="post">
+        <button class="secondary-button" type="submit">
+            {% if stock.status == "paused" %}Resume Stock{% else %}Pause Stock{% endif %}
+        </button>
+    </form>
+    <form action="{{ url_for('delete_stock', stock_id=stock.id) }}" method="post" data-confirm="Delete this stock?">
+        <button class="danger-button" type="submit">Delete Stock</button>
+    </form>
+</section>
+{% endblock %}

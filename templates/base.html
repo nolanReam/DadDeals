@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title or "DadDeals" }} - DadDeals</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header class="site-header">
+        <a class="brand" href="{{ url_for('dashboard') }}">DadDeals</a>
+        {% if session.get("logged_in") %}
+            <form action="{{ url_for('logout') }}" method="post">
+                <button class="small-button" type="submit">Log out</button>
+            </form>
+        {% endif %}
+    </header>
+
+    <main class="page">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-list">
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {% if is_login %}
+            <section class="panel narrow">
+                <h1>DadDeals Login</h1>
+                <p class="muted">Enter the admin password from your local .env file.</p>
+                <form class="stack" method="post">
+                    <label>
+                        Password
+                        <input type="password" name="password" required autofocus>
+                    </label>
+                    <button class="primary-button" type="submit">Log in</button>
+                </form>
+            </section>
+        {% else %}
+            {% block content %}{% endblock %}
+        {% endif %}
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
