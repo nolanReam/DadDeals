@@ -178,6 +178,7 @@ button,
 
 .card {
     padding: 16px;
+    min-width: 0;
 }
 
 .card-top {
@@ -297,6 +298,30 @@ dd {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+}
+
+.danger-copy {
+    flex: 1 1 100%;
+}
+
+.danger-copy h2 {
+    margin-bottom: 4px;
+}
+
+@media (max-width: 420px) {
+    .button-row,
+    .danger-zone {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    button,
+    .primary-button,
+    .secondary-button,
+    .small-button,
+    .danger-button {
+        width: 100%;
+    }
 }
 
 @media (min-width: 720px) {

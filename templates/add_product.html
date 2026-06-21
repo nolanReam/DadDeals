@@ -6,33 +6,33 @@
     <form class="stack" method="post">
         <label>
             Product name
-            <input name="name" required>
+            <input name="name" value="{{ form.get('name', '') }}" required>
         </label>
         <label>
             Product page URL
-            <input type="url" name="url" required>
+            <input type="url" name="url" value="{{ form.get('url', '') }}" placeholder="https://example.com/item" pattern="https?://.+" required>
         </label>
         <label>
             Target price
-            <input type="number" step="0.01" min="0" name="target_price" placeholder="Example: 49.99">
+            <input type="number" step="0.01" min="0" name="target_price" value="{{ form.get('target_price', '') if form.get('target_price') is not none }}" placeholder="Example: 49.99">
         </label>
         <label>
             Big drop percent
-            <input type="number" step="0.1" min="0" name="big_drop_percent" placeholder="Example: 20">
+            <input type="number" step="0.1" min="0" name="big_drop_percent" value="{{ form.get('big_drop_percent', '') if form.get('big_drop_percent') is not none }}" placeholder="Example: 20">
         </label>
         <label class="check-row">
-            <input type="checkbox" name="notify_on_target" checked>
+            <input type="checkbox" name="notify_on_target" {% if form.get('notify_on_target', 1) %}checked{% endif %}>
             Tell me when it reaches the target price
         </label>
         <label class="check-row">
-            <input type="checkbox" name="notify_on_big_drop">
+            <input type="checkbox" name="notify_on_big_drop" {% if form.get('notify_on_big_drop', 0) %}checked{% endif %}>
             Tell me when there is a big drop
         </label>
         <label>
             Status
             <select name="status">
-                <option value="active">Active</option>
-                <option value="paused">Paused</option>
+                <option value="active" {% if form.get('status', 'active') == 'active' %}selected{% endif %}>Active</option>
+                <option value="paused" {% if form.get('status') == 'paused' %}selected{% endif %}>Paused</option>
             </select>
         </label>
         <div class="button-row">

@@ -1,7 +1,9 @@
 import os
 import sqlite3
+import sys
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from flask import (
@@ -23,6 +25,7 @@ load_dotenv()
 
 
 BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DATABASE_PATH = BASE_DIR / "instance" / "daddeals.db"
 
 
 def create_app():
@@ -35,8 +38,10 @@ def create_app():
     app.config["SECRET_KEY"] = os.environ.get("APP_SECRET_KEY", "dev-only-change-me")
     app.config["ADMIN_PASSWORD"] = os.environ.get("ADMIN_PASSWORD", "replace_me")
     app.config["DATABASE_PATH"] = os.environ.get(
-        "DATABASE_PATH", str(BASE_DIR / "instance" / "daddash.db")
+        "DATABASE_PATH", str(DEFAULT_DATABASE_PATH)
     )
+    app.config["HOST"] = os.environ.get("HOST", "0.0.0.0")
+    app.config["PORT"] = int(os.environ.get("PORT", "5000"))
 
     # Make sure the instance folder exists. Flask's instance folder is the
     # right place for local data that should not be committed, like SQLite DBs.
@@ -115,20 +120,23 @@ def login_required(view):
     return wrapped_view
 
 
-def parse_money(value):
-    """Convert a form field to a float, or None when the field is blank."""
+def parse_non_negative_number(value, field_label, errors):
+    """Convert a blank-friendly number field and reject negative values."""
     value = value.strip()
     if not value:
         return None
-    return float(value)
 
-
-def parse_percent(value):
-    """Convert a percentage form field to a float, or None when blank."""
-    value = value.strip()
-    if not value:
+    try:
+        number = float(value)
+    except ValueError:
+        errors.append(f"{field_label} must be a number.")
         return None
-    return float(value)
+
+    if number < 0:
+        errors.append(f"{field_label} cannot be negative.")
+        return None
+
+    return number
 
 
 def checkbox_value(name):
@@ -142,6 +150,76 @@ def clean_status():
     if status not in {"active", "paused"}:
         return "active"
     return status
+
+
+def validate_required(value, field_label, errors):
+    """Trim a required text field and collect a friendly error if it is blank."""
+    clean_value = value.strip()
+    if not clean_value:
+        errors.append(f"{field_label} is required.")
+    return clean_value
+
+
+def validate_http_url(value, field_label, errors):
+    """Require a normal http:// or https:// URL."""
+    clean_value = validate_required(value, field_label, errors)
+    if not clean_value:
+        return clean_value
+
+    parsed = urlparse(clean_value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        errors.append(f"{field_label} must start with http:// or https://.")
+
+    return clean_value
+
+
+def product_form_data():
+    """Read and validate product form fields."""
+    errors = []
+    data = {
+        "name": validate_required(request.form.get("name", ""), "Product name", errors),
+        "url": validate_http_url(request.form.get("url", ""), "Product page URL", errors),
+        "target_price": parse_non_negative_number(
+            request.form.get("target_price", ""), "Target price", errors
+        ),
+        "big_drop_percent": parse_non_negative_number(
+            request.form.get("big_drop_percent", ""), "Big drop percent", errors
+        ),
+        "notify_on_target": checkbox_value("notify_on_target"),
+        "notify_on_big_drop": checkbox_value("notify_on_big_drop"),
+        "status": clean_status(),
+    }
+    return data, errors
+
+
+def stock_form_data():
+    """Read and validate stock form fields."""
+    errors = []
+    data = {
+        "company_name": validate_required(
+            request.form.get("company_name", ""), "Company name", errors
+        ),
+        "ticker": validate_required(request.form.get("ticker", ""), "Ticker", errors).upper(),
+        "target_price": parse_non_negative_number(
+            request.form.get("target_price", ""), "Target price", errors
+        ),
+        "daily_drop_percent": parse_non_negative_number(
+            request.form.get("daily_drop_percent", ""), "Daily drop percent", errors
+        ),
+        "daily_rise_percent": parse_non_negative_number(
+            request.form.get("daily_rise_percent", ""), "Daily rise percent", errors
+        ),
+        "notify_on_target": checkbox_value("notify_on_target"),
+        "notify_on_big_drop": checkbox_value("notify_on_big_drop"),
+        "status": clean_status(),
+    }
+    return data, errors
+
+
+def flash_errors(errors):
+    """Show each validation error as a normal Flask flash message."""
+    for error in errors:
+        flash(error, "error")
 
 
 def register_cli_commands(app):
@@ -197,33 +275,37 @@ def register_routes(app):
     @login_required
     def add_product():
         if request.method == "POST":
-            try:
-                db = get_db()
-                db.execute(
-                    """
-                    INSERT INTO tracked_products (
-                        name, url, target_price, big_drop_percent,
-                        notify_on_target, notify_on_big_drop, status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        request.form["name"].strip(),
-                        request.form["url"].strip(),
-                        parse_money(request.form.get("target_price", "")),
-                        parse_percent(request.form.get("big_drop_percent", "")),
-                        checkbox_value("notify_on_target"),
-                        checkbox_value("notify_on_big_drop"),
-                        clean_status(),
-                    ),
+            data, errors = product_form_data()
+            if errors:
+                flash_errors(errors)
+                return render_template(
+                    "add_product.html", page_title="Add Product", form=data
                 )
-                db.commit()
-                flash("Product added.", "success")
-                return redirect(url_for("dashboard"))
-            except (KeyError, ValueError):
-                flash("Please check the product fields and try again.", "error")
 
-        return render_template("add_product.html", page_title="Add Product")
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO tracked_products (
+                    name, url, target_price, big_drop_percent,
+                    notify_on_target, notify_on_big_drop, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["name"],
+                    data["url"],
+                    data["target_price"],
+                    data["big_drop_percent"],
+                    data["notify_on_target"],
+                    data["notify_on_big_drop"],
+                    data["status"],
+                ),
+            )
+            db.commit()
+            flash("Product added.", "success")
+            return redirect(url_for("dashboard"))
+
+        return render_template("add_product.html", page_title="Add Product", form={})
 
     @app.route("/products/<int:product_id>")
     @login_required
@@ -238,41 +320,51 @@ def register_routes(app):
     def edit_product(product_id):
         product = get_product_or_404(product_id)
         if request.method == "POST":
-            try:
-                db = get_db()
-                db.execute(
-                    """
-                    UPDATE tracked_products
-                    SET name = ?,
-                        url = ?,
-                        target_price = ?,
-                        big_drop_percent = ?,
-                        notify_on_target = ?,
-                        notify_on_big_drop = ?,
-                        status = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        request.form["name"].strip(),
-                        request.form["url"].strip(),
-                        parse_money(request.form.get("target_price", "")),
-                        parse_percent(request.form.get("big_drop_percent", "")),
-                        checkbox_value("notify_on_target"),
-                        checkbox_value("notify_on_big_drop"),
-                        clean_status(),
-                        product_id,
-                    ),
+            data, errors = product_form_data()
+            if errors:
+                flash_errors(errors)
+                return render_template(
+                    "edit_product.html",
+                    product=product,
+                    form=data,
+                    page_title=f"Edit {product['name']}",
                 )
-                db.commit()
-                flash("Product updated.", "success")
-                return redirect(url_for("product_detail", product_id=product_id))
-            except (KeyError, ValueError):
-                flash("Please check the product fields and try again.", "error")
+
+            db = get_db()
+            db.execute(
+                """
+                UPDATE tracked_products
+                SET name = ?,
+                    url = ?,
+                    target_price = ?,
+                    big_drop_percent = ?,
+                    notify_on_target = ?,
+                    notify_on_big_drop = ?,
+                    status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    data["name"],
+                    data["url"],
+                    data["target_price"],
+                    data["big_drop_percent"],
+                    data["notify_on_target"],
+                    data["notify_on_big_drop"],
+                    data["status"],
+                    product_id,
+                ),
+            )
+            db.commit()
+            flash("Product updated.", "success")
+            return redirect(url_for("product_detail", product_id=product_id))
 
         product = get_product_or_404(product_id)
         return render_template(
-            "edit_product.html", product=product, page_title=f"Edit {product['name']}"
+            "edit_product.html",
+            product=product,
+            form={},
+            page_title=f"Edit {product['name']}",
         )
 
     @app.route("/products/<int:product_id>/toggle", methods=["POST"])
@@ -305,35 +397,37 @@ def register_routes(app):
     @login_required
     def add_stock():
         if request.method == "POST":
-            try:
-                db = get_db()
-                db.execute(
-                    """
-                    INSERT INTO tracked_stocks (
-                        company_name, ticker, target_price, daily_drop_percent,
-                        daily_rise_percent, notify_on_target,
-                        notify_on_big_drop, status
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        request.form["company_name"].strip(),
-                        request.form["ticker"].strip().upper(),
-                        parse_money(request.form.get("target_price", "")),
-                        parse_percent(request.form.get("daily_drop_percent", "")),
-                        parse_percent(request.form.get("daily_rise_percent", "")),
-                        checkbox_value("notify_on_target"),
-                        checkbox_value("notify_on_big_drop"),
-                        clean_status(),
-                    ),
-                )
-                db.commit()
-                flash("Stock added.", "success")
-                return redirect(url_for("dashboard"))
-            except (KeyError, ValueError):
-                flash("Please check the stock fields and try again.", "error")
+            data, errors = stock_form_data()
+            if errors:
+                flash_errors(errors)
+                return render_template("add_stock.html", page_title="Add Stock", form=data)
 
-        return render_template("add_stock.html", page_title="Add Stock")
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO tracked_stocks (
+                    company_name, ticker, target_price, daily_drop_percent,
+                    daily_rise_percent, notify_on_target,
+                    notify_on_big_drop, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data["company_name"],
+                    data["ticker"],
+                    data["target_price"],
+                    data["daily_drop_percent"],
+                    data["daily_rise_percent"],
+                    data["notify_on_target"],
+                    data["notify_on_big_drop"],
+                    data["status"],
+                ),
+            )
+            db.commit()
+            flash("Stock added.", "success")
+            return redirect(url_for("dashboard"))
+
+        return render_template("add_stock.html", page_title="Add Stock", form={})
 
     @app.route("/stocks/<int:stock_id>")
     @login_required
@@ -348,43 +442,53 @@ def register_routes(app):
     def edit_stock(stock_id):
         stock = get_stock_or_404(stock_id)
         if request.method == "POST":
-            try:
-                db = get_db()
-                db.execute(
-                    """
-                    UPDATE tracked_stocks
-                    SET company_name = ?,
-                        ticker = ?,
-                        target_price = ?,
-                        daily_drop_percent = ?,
-                        daily_rise_percent = ?,
-                        notify_on_target = ?,
-                        notify_on_big_drop = ?,
-                        status = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        request.form["company_name"].strip(),
-                        request.form["ticker"].strip().upper(),
-                        parse_money(request.form.get("target_price", "")),
-                        parse_percent(request.form.get("daily_drop_percent", "")),
-                        parse_percent(request.form.get("daily_rise_percent", "")),
-                        checkbox_value("notify_on_target"),
-                        checkbox_value("notify_on_big_drop"),
-                        clean_status(),
-                        stock_id,
-                    ),
+            data, errors = stock_form_data()
+            if errors:
+                flash_errors(errors)
+                return render_template(
+                    "edit_stock.html",
+                    stock=stock,
+                    form=data,
+                    page_title=f"Edit {stock['ticker']}",
                 )
-                db.commit()
-                flash("Stock updated.", "success")
-                return redirect(url_for("stock_detail", stock_id=stock_id))
-            except (KeyError, ValueError):
-                flash("Please check the stock fields and try again.", "error")
+
+            db = get_db()
+            db.execute(
+                """
+                UPDATE tracked_stocks
+                SET company_name = ?,
+                    ticker = ?,
+                    target_price = ?,
+                    daily_drop_percent = ?,
+                    daily_rise_percent = ?,
+                    notify_on_target = ?,
+                    notify_on_big_drop = ?,
+                    status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    data["company_name"],
+                    data["ticker"],
+                    data["target_price"],
+                    data["daily_drop_percent"],
+                    data["daily_rise_percent"],
+                    data["notify_on_target"],
+                    data["notify_on_big_drop"],
+                    data["status"],
+                    stock_id,
+                ),
+            )
+            db.commit()
+            flash("Stock updated.", "success")
+            return redirect(url_for("stock_detail", stock_id=stock_id))
 
         stock = get_stock_or_404(stock_id)
         return render_template(
-            "edit_stock.html", stock=stock, page_title=f"Edit {stock['ticker']}"
+            "edit_stock.html",
+            stock=stock,
+            form={},
+            page_title=f"Edit {stock['ticker']}",
         )
 
     @app.route("/stocks/<int:stock_id>/toggle", methods=["POST"])
@@ -435,7 +539,24 @@ def get_stock_or_404(stock_id):
 app = create_app()
 
 
+def main():
+    """Run beginner-friendly commands from `python app.py`."""
+    if len(sys.argv) > 1 and sys.argv[1] == "--init-db":
+        with app.app_context():
+            init_db()
+            print(f"Database is ready at {database_path()}")
+        return
+
+    if len(sys.argv) > 1:
+        print("Unknown option. Use `python app.py` or `python app.py --init-db`.")
+        sys.exit(2)
+
+    app.run(
+        host=app.config["HOST"],
+        port=app.config["PORT"],
+        debug=False,
+    )
+
+
 if __name__ == "__main__":
-    # host=127.0.0.1 is safest for local PC use.
-    # On the Raspberry Pi, use: flask --app app run --host 0.0.0.0
-    app.run(debug=True)
+    main()

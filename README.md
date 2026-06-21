@@ -1,46 +1,97 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1A is intentionally simple: Flask pages, Jinja templates, SQLite tables, and basic create/edit/delete screens.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1A is intentionally simple: Flask pages, Jinja templates, SQLite tables, password login, and basic create/edit/delete screens.
 
-This phase does not include scraping, stock downloads, Telegram sending, cron jobs, background workers, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include scraping, yfinance, stock downloads, Telegram sending, cron jobs, background workers, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
 
 ## Project Structure
 
 ```text
 DadDeals/
-├── app.py
-├── worker.py
-├── schema.sql
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── README.md
-├── templates/
-├── static/
-└── instance/
+|-- app.py
+|-- worker.py
+|-- schema.sql
+|-- requirements.txt
+|-- .env.example
+|-- .gitignore
+|-- README.md
+|-- templates/
+|-- static/
+`-- instance/
 ```
 
-The SQLite database belongs in `instance/`. The `.gitignore` file prevents local database files and the real `.env` file from being committed.
+The SQLite database belongs in `instance/`. The real `.env` file and database files are ignored by Git.
 
-## Setup on a PC
+## Windows Local Setup
 
-Open a terminal in the DadDeals folder.
+Open PowerShell in the DadDeals folder.
 
 Create a virtual environment:
 
-```bash
+```powershell
 python -m venv .venv
 ```
 
-Activate it on Windows PowerShell:
+Activate it:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-Activate it on macOS, Linux, or Raspberry Pi OS:
+Install requirements:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Create your real local `.env` file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and replace at least these values:
+
+```text
+APP_SECRET_KEY=use_a_long_random_value_here
+ADMIN_PASSWORD=choose_a_password_for_the_dashboard
+DATABASE_PATH=instance/daddeals.db
+HOST=0.0.0.0
+PORT=5000
+```
+
+The Telegram values stay as placeholders for now.
+
+Initialize the database:
+
+```powershell
+python app.py --init-db
+```
+
+This creates the `instance/` folder if needed and creates any missing tables from `schema.sql`. Running it again is safe because the schema uses `CREATE TABLE IF NOT EXISTS`; it does not erase existing data.
+
+Run the app:
+
+```powershell
+python app.py
+```
+
+Open this on the same PC:
+
+```text
+http://127.0.0.1:5000
+```
+
+Log in with the `ADMIN_PASSWORD` from your `.env` file.
+
+## Raspberry Pi Setup
+
+On Raspberry Pi OS, open a terminal in the DadDeals folder.
+
+Create and activate a virtual environment:
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -50,86 +101,104 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
-Create your real local `.env` file from the example:
+Create your real local `.env` file:
 
 ```bash
 cp .env.example .env
 ```
 
-On Windows PowerShell, use:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Edit `.env` and replace these values:
-
-```text
-APP_SECRET_KEY=use_a_long_random_value_here
-ADMIN_PASSWORD=choose_a_password_for_the_dashboard
-DATABASE_PATH=instance/daddeals.db
-```
-
-The Telegram values stay as placeholders for now.
-
-## Initialize the Database
-
-The app can create the database automatically the first time it runs. You can also initialize it yourself:
+Edit `.env`:
 
 ```bash
-flask --app app init-db
+nano .env
 ```
 
-This creates the SQLite database at the path from `.env`, usually `instance/daddeals.db`.
+Use these network defaults unless you have a reason to change them:
 
-## Run Locally on a PC
+```text
+DATABASE_PATH=instance/daddeals.db
+HOST=0.0.0.0
+PORT=5000
+```
+
+Initialize the database:
+
+```bash
+python app.py --init-db
+```
+
+Run the app:
 
 ```bash
 python app.py
 ```
 
-Open:
-
-```text
-http://127.0.0.1:5000
-```
-
-Log in with the `ADMIN_PASSWORD` from your `.env` file.
-
-## Run on Raspberry Pi
-
-On the Raspberry Pi, activate the virtual environment and run:
-
-```bash
-flask --app app run --host 0.0.0.0
-```
-
-From a phone on the same Wi-Fi network, open:
+From a phone on the same Wi-Fi network, try:
 
 ```text
 http://raspberrypi.local:5000
 ```
 
-If that address does not open, use the Pi's IP address instead, such as:
+If that does not work, use the Pi's IP address instead. The IP address is often more reliable than `raspberrypi.local` because some routers and phones do not handle local hostname resolution well.
+
+Find the Pi's IP address:
+
+```bash
+hostname -I
+```
+
+Then open something like this from your phone:
 
 ```text
 http://192.168.1.50:5000
 ```
 
-## Manual Test Steps
+## Database Commands
+
+Initialize or update missing tables without deleting data:
+
+```bash
+python app.py --init-db
+```
+
+There is no reset command in Phase 1A. That is intentional, so a beginner command cannot accidentally wipe saved products or stocks.
+
+## Manual Test Checklist
 
 1. Start the app with `python app.py`.
-2. Open `http://127.0.0.1:5000`.
+2. Open `http://127.0.0.1:5000` on the computer running it.
 3. Confirm the login page appears.
 4. Log in with the password from `.env`.
 5. Confirm the dashboard shows products, stocks, and recent alerts sections.
-6. Add a product with a name, URL, target price, and big drop percent.
-7. Open the product detail page and confirm the placeholders are visible.
-8. Edit the product, pause it, resume it, and then delete it.
-9. Add a stock with company name, ticker, target price, daily drop percent, and daily rise percent.
-10. Open the stock detail page and confirm the future price history placeholder is visible.
-11. Edit the stock, pause it, resume it, and then delete it.
-12. Log out and confirm the dashboard is protected.
+6. Confirm the empty states say no products, no stocks, and no alerts when the database is empty.
+7. Add a product with an `http://` or `https://` URL.
+8. Try adding a product with a blank name, a URL without `http://` or `https://`, and a negative target price. Confirm friendly errors appear.
+9. Open the product detail page and confirm the future price history and source check placeholders are visible.
+10. Edit the product, pause it, resume it, and delete it. Confirm delete asks before removing it.
+11. Add a stock with a lowercase ticker and confirm it saves uppercase.
+12. Try adding a stock with a blank company name and a negative percentage. Confirm friendly errors appear.
+13. Open the stock detail page and confirm the future price history placeholder is visible.
+14. Edit the stock, pause it, resume it, and delete it. Confirm delete asks before removing it.
+15. Log out and confirm the dashboard is protected.
+16. On the Raspberry Pi, open the app from a phone at `http://<pi-ip>:5000`.
+
+## Troubleshooting
+
+If `raspberrypi.local:5000` does not work:
+
+- Make sure the phone and Pi are on the same Wi-Fi network.
+- Use `hostname -I` on the Pi and open `http://<pi-ip>:5000` from the phone.
+- Confirm the app was started with `python app.py`.
+- Confirm `.env` has `HOST=0.0.0.0` and `PORT=5000`.
+- Check whether the Pi firewall or router is blocking local device connections.
+
+If the database does not exist:
+
+```bash
+python app.py --init-db
+```
+
+If login does not work, check `ADMIN_PASSWORD` in `.env`.
 
 ## Notes for Later Phases
 
