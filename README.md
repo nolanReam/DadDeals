@@ -67,7 +67,7 @@ Edit `.env` and replace these values:
 ```text
 APP_SECRET_KEY=use_a_long_random_value_here
 ADMIN_PASSWORD=choose_a_password_for_the_dashboard
-DATABASE_PATH=instance/daddash.db
+DATABASE_PATH=instance/daddeals.db
 ```
 
 The Telegram values stay as placeholders for now.
@@ -80,7 +80,7 @@ The app can create the database automatically the first time it runs. You can al
 flask --app app init-db
 ```
 
-This creates the SQLite database at the path from `.env`, usually `instance/daddash.db`.
+This creates the SQLite database at the path from `.env`, usually `instance/daddeals.db`.
 
 ## Run Locally on a PC
 
