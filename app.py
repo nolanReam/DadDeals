@@ -103,9 +103,32 @@ def init_db():
 
 
 def ensure_database():
-    """Initialize the database if the configured database file is missing."""
-    if not database_path().exists():
+    """Initialize the database if the file or Phase 1B tables are missing."""
+    if not database_path().exists() or schema_tables_missing():
         init_db()
+
+
+def schema_tables_missing():
+    """Check for required tables without changing existing user data."""
+    db = get_db()
+    required_tables = {
+        "tracked_products",
+        "tracked_stocks",
+        "alerts",
+        "price_checks",
+        "stock_checks",
+    }
+    rows = db.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN (?, ?, ?, ?, ?)
+        """,
+        tuple(required_tables),
+    ).fetchall()
+    existing_tables = {row["name"] for row in rows}
+    return required_tables != existing_tables
 
 
 def login_required(view):
@@ -310,9 +333,23 @@ def register_routes(app):
     @app.route("/products/<int:product_id>")
     @login_required
     def product_detail(product_id):
+        db = get_db()
         product = get_product_or_404(product_id)
+        price_checks = db.execute(
+            """
+            SELECT *
+            FROM price_checks
+            WHERE product_id = ?
+            ORDER BY checked_at DESC, id DESC
+            LIMIT 10
+            """,
+            (product_id,),
+        ).fetchall()
         return render_template(
-            "product_detail.html", product=product, page_title=product["name"]
+            "product_detail.html",
+            product=product,
+            price_checks=price_checks,
+            page_title=product["name"],
         )
 
     @app.route("/products/<int:product_id>/edit", methods=["GET", "POST"])
@@ -432,9 +469,23 @@ def register_routes(app):
     @app.route("/stocks/<int:stock_id>")
     @login_required
     def stock_detail(stock_id):
+        db = get_db()
         stock = get_stock_or_404(stock_id)
+        stock_checks = db.execute(
+            """
+            SELECT *
+            FROM stock_checks
+            WHERE stock_id = ?
+            ORDER BY checked_at DESC, id DESC
+            LIMIT 10
+            """,
+            (stock_id,),
+        ).fetchall()
         return render_template(
-            "stock_detail.html", stock=stock, page_title=stock["ticker"]
+            "stock_detail.html",
+            stock=stock,
+            stock_checks=stock_checks,
+            page_title=stock["ticker"],
         )
 
     @app.route("/stocks/<int:stock_id>/edit", methods=["GET", "POST"])

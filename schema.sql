@@ -35,3 +35,30 @@ CREATE TABLE IF NOT EXISTS alerts (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     sent_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS price_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source_name TEXT NOT NULL,
+    current_price REAL,
+    previous_price REAL,
+    target_price REAL,
+    status TEXT NOT NULL,
+    message TEXT,
+    FOREIGN KEY (product_id) REFERENCES tracked_products (id)
+);
+
+CREATE TABLE IF NOT EXISTS stock_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_id INTEGER NOT NULL,
+    checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ticker TEXT NOT NULL,
+    current_price REAL,
+    previous_close REAL,
+    target_price REAL,
+    percent_change REAL,
+    status TEXT NOT NULL,
+    message TEXT,
+    FOREIGN KEY (stock_id) REFERENCES tracked_stocks (id)
+);

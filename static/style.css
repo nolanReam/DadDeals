@@ -176,9 +176,21 @@ button,
     gap: 12px;
 }
 
+.history-list {
+    display: grid;
+    gap: 10px;
+}
+
 .card {
     padding: 16px;
     min-width: 0;
+}
+
+.history-item {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
 }
 
 .card-top {

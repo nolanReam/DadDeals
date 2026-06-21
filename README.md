@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1A is intentionally simple: Flask pages, Jinja templates, SQLite tables, password login, and basic create/edit/delete screens.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1B adds a safe one-shot worker foundation that creates simulated product and stock check history.
 
-This phase does not include scraping, yfinance, stock downloads, Telegram sending, cron jobs, background workers, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include scraping, yfinance, real stock downloads, Telegram sending, cron jobs, infinite background loops, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
 
 ## Project Structure
 
@@ -70,6 +70,18 @@ python app.py --init-db
 
 This creates the `instance/` folder if needed and creates any missing tables from `schema.sql`. Running it again is safe because the schema uses `CREATE TABLE IF NOT EXISTS`; it does not erase existing data.
 
+Preview the simulated worker without saving anything:
+
+```powershell
+python worker.py --dry-run
+```
+
+Run one simulated worker pass and save check history plus alerts:
+
+```powershell
+python worker.py --run
+```
+
 Run the app:
 
 ```powershell
@@ -127,6 +139,18 @@ Initialize the database:
 python app.py --init-db
 ```
 
+Preview the simulated worker without saving anything:
+
+```bash
+python worker.py --dry-run
+```
+
+Run one simulated worker pass and save check history plus alerts:
+
+```bash
+python worker.py --run
+```
+
 Run the app:
 
 ```bash
@@ -161,7 +185,35 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1A. That is intentional, so a beginner command cannot accidentally wipe saved products or stocks.
+There is no reset command in Phase 1B. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, or alerts.
+
+## Worker Commands
+
+Phase 1B uses simulated data only. The worker does not scrape product pages, does not call yfinance, and does not send Telegram messages. Real product checking and real stock checking come in later phases.
+
+Preview one worker pass without saving rows:
+
+```bash
+python worker.py --dry-run
+```
+
+Run one worker pass and save rows:
+
+```bash
+python worker.py --run
+```
+
+The worker runs once and exits. It reads active products and stocks from SQLite, inserts rows into `price_checks` and `stock_checks`, and creates local rows in `alerts` when simulated values meet your saved thresholds.
+
+To view worker results:
+
+1. Run `python worker.py --run`.
+2. Start the web app with `python app.py`.
+3. Open the dashboard to see recent alerts.
+4. Open a product detail page to see recent price checks.
+5. Open a stock detail page to see recent stock checks.
+
+If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over.
 
 ## Manual Test Checklist
 
@@ -181,6 +233,10 @@ There is no reset command in Phase 1A. That is intentional, so a beginner comman
 14. Edit the stock, pause it, resume it, and delete it. Confirm delete asks before removing it.
 15. Log out and confirm the dashboard is protected.
 16. On the Raspberry Pi, open the app from a phone at `http://<pi-ip>:5000`.
+17. Run `python worker.py --dry-run` and confirm it prints a summary without saving checks.
+18. Run `python worker.py --run` and confirm it prints a summary with saved checks.
+19. Refresh the dashboard and confirm recent alerts appear if simulated thresholds were met.
+20. Open product and stock detail pages and confirm recent check history appears.
 
 ## Troubleshooting
 
@@ -202,4 +258,4 @@ If login does not work, check `ADMIN_PASSWORD` in `.env`.
 
 ## Notes for Later Phases
 
-`worker.py` is only a placeholder in Phase 1A. Later phases can add scraping, stock checks, Telegram alerts, and scheduled background work there.
+`worker.py` is a simulated foundation in Phase 1B. Later phases can replace the fake check values with real product checks, yfinance stock checks, Telegram alerts, and scheduled background work.
