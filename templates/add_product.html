@@ -15,6 +15,10 @@
         <div class="helper-box">
             Exact product pages work best. Some sites block automated checks. If a site fails, try a different store page. Amazon pages may not work reliably because Amazon often blocks automated price checks. If an Amazon link fails, DadDeals will still save the link, but you may need to check it manually or use a different store page.
         </div>
+        <div class="helper-box" id="store-helper">
+            Detected store: <strong id="detected-store">{{ detected_store or form.get('detected_store', 'Other website') }}</strong>.
+            Best Buy works best with Crawlbase. Amazon uses Canopy first; Crawlbase fallback is optional and usually not needed.
+        </div>
         <label>
             Target price
             <input type="number" step="0.01" min="0" name="target_price" value="{{ form.get('target_price', '') if form.get('target_price') is not none }}" placeholder="Example: 49.99">
@@ -30,6 +34,14 @@
         <label class="check-row">
             <input type="checkbox" name="notify_on_big_drop" {% if form.get('notify_on_big_drop', 0) %}checked{% endif %}>
             Tell me when there is a big drop
+        </label>
+        <label class="check-row">
+            <input id="allow-crawlbase" type="checkbox" name="allow_crawlbase_fallback" {% if form.get('allow_crawlbase_fallback', 0) %}checked{% endif %}>
+            Use Crawlbase if normal check fails
+        </label>
+        <label class="check-row">
+            <input id="prefer-crawlbase" type="checkbox" name="prefer_crawlbase" {% if form.get('prefer_crawlbase', 0) %}checked{% endif %}>
+            Prefer Crawlbase for this product
         </label>
         <label>
             Status

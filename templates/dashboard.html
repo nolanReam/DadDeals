@@ -39,6 +39,8 @@
                     {% if summary.source_name %}
                         <p>Source: {{ summary.source_name }}</p>
                     {% endif %}
+                    <p>Store: {{ product.last_detected_store or "Not detected yet" }}</p>
+                    <p>Check method: {{ product.last_check_method|replace("_", " ")|title if product.last_check_method else "Not checked yet" }}</p>
                     {% if summary.source_url %}
                         <p><a href="{{ summary.source_url }}" target="_blank" rel="noopener">Open product source</a></p>
                     {% endif %}
@@ -60,6 +62,11 @@
                             <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
                                 <button class="small-button" type="submit">Retry</button>
                             </form>
+                            {% if product.allow_crawlbase_fallback or product.prefer_crawlbase %}
+                                <form action="{{ url_for('retry_product_check_with_crawlbase', product_id=product.id) }}" method="post" data-confirm="Retry this product with Crawlbase now? This may use one Crawlbase request.">
+                                    <button class="small-button" type="submit">Retry with Crawlbase</button>
+                                </form>
+                            {% endif %}
                         {% endif %}
                     </div>
                 </article>

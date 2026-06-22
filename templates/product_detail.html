@@ -15,9 +15,14 @@
 <section class="panel">
     <h2>Check Now</h2>
     <p class="muted">Retry this product only. Amazon retries may use one Canopy request if Canopy is enabled and the ASIN can be read.</p>
-    <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
-        <button class="primary-button" type="submit">Retry Price Check Now</button>
-    </form>
+    <div class="button-row">
+        <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
+            <button class="primary-button" type="submit">Retry Price Check Now</button>
+        </form>
+        <form action="{{ url_for('retry_product_check_with_crawlbase', product_id=product.id) }}" method="post" data-confirm="Retry this product with Crawlbase now? This may use one Crawlbase request.">
+            <button class="secondary-button" type="submit">Retry with Crawlbase</button>
+        </form>
+    </div>
 </section>
 
 <section class="panel">
@@ -60,6 +65,14 @@
             <dd>{{ summary.source_name if summary.source_name else "Not available" }}</dd>
         </div>
         <div>
+            <dt>Detected store</dt>
+            <dd>{{ product.last_detected_store if product.last_detected_store else "Not detected yet" }}</dd>
+        </div>
+        <div>
+            <dt>Last check method</dt>
+            <dd>{{ product.last_check_method|replace("_", " ")|title if product.last_check_method else "Not checked yet" }}</dd>
+        </div>
+        <div>
             <dt>Product page</dt>
             <dd><a href="{{ summary.source_url or product.url }}" target="_blank" rel="noopener">Open product page</a></dd>
         </div>
@@ -92,6 +105,14 @@
         <div>
             <dt>Big drop alerts</dt>
             <dd>{{ "On" if product.notify_on_big_drop else "Off" }}</dd>
+        </div>
+        <div>
+            <dt>Crawlbase fallback</dt>
+            <dd>{{ "On" if product.allow_crawlbase_fallback else "Off" }}</dd>
+        </div>
+        <div>
+            <dt>Prefer Crawlbase</dt>
+            <dd>{{ "On" if product.prefer_crawlbase else "Off" }}</dd>
         </div>
     </dl>
 </section>

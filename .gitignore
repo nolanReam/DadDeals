@@ -10,3 +10,4 @@ instance/*.sqlite
 instance/*.sqlite3
 logs/
 *.log
+backups/

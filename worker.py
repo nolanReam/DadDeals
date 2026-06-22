@@ -30,6 +30,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_PATH = BASE_DIR / "instance" / "daddeals.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 CANOPY_PROVIDER = "canopy"
+CRAWLBASE_PROVIDER = "crawlbase"
 CANOPY_AMAZON_SOURCE = "Amazon via Canopy"
 AMAZON_MANUAL_MESSAGE = (
     "Amazon automatic checks need Canopy enabled and available monthly requests. "
@@ -60,6 +61,7 @@ def init_db(db):
         db.executescript(file.read())
     migrate_alert_delivery_columns(db)
     migrate_price_check_columns(db)
+    migrate_product_crawlbase_columns(db)
     db.commit()
 
 
@@ -103,6 +105,25 @@ def migrate_price_check_columns(db):
         WHERE source_url IS NULL
         """
     )
+
+
+def migrate_product_crawlbase_columns(db):
+    """Add Phase 2F product Crawlbase columns to older databases."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    if "allow_crawlbase_fallback" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN allow_crawlbase_fallback INTEGER NOT NULL DEFAULT 0"
+        )
+    if "prefer_crawlbase" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN prefer_crawlbase INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_check_method" not in existing_columns:
+        db.execute("ALTER TABLE tracked_products ADD COLUMN last_check_method TEXT")
+    if "last_detected_store" not in existing_columns:
+        db.execute("ALTER TABLE tracked_products ADD COLUMN last_detected_store TEXT")
 
 
 class ProductFetchError(Exception):
@@ -273,11 +294,75 @@ def fetch_product_price(url):
             f"Product page returned HTTP {response.status_code}. Some sites block automated checks."
         )
 
-    price = extract_price_from_html(response.text)
+    parsed = parse_generic_product_page(response.text, url)
+    price = parsed.get("current_price")
     if price is None:
         raise ProductFetchError("No product price was found on the page.")
 
     return price
+
+
+def source_label_for_url(url):
+    """Detect a known retailer source from a product URL."""
+    host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if host == "bestbuy.com" or host.endswith(".bestbuy.com"):
+        return "Best Buy"
+    if host == "newegg.com" or host.endswith(".newegg.com"):
+        return "Newegg"
+    if host == "walmart.com" or host.endswith(".walmart.com"):
+        return "Walmart"
+    if host == "target.com" or host.endswith(".target.com"):
+        return "Target"
+    if host == "homedepot.com" or host.endswith(".homedepot.com"):
+        return "Home Depot"
+    if is_amazon_url(url):
+        return "Amazon"
+    return product_source_name(url)
+
+
+def is_best_buy_url(url):
+    """Return True when the URL points at Best Buy."""
+    return source_label_for_url(url) == "Best Buy"
+
+
+def is_newegg_url(url):
+    """Return True when the URL points at Newegg."""
+    return source_label_for_url(url) == "Newegg"
+
+
+def is_walmart_url(url):
+    """Return True when the URL points at Walmart."""
+    return source_label_for_url(url) == "Walmart"
+
+
+def is_target_url(url):
+    """Return True when the URL points at Target."""
+    return source_label_for_url(url) == "Target"
+
+
+def is_home_depot_url(url):
+    """Return True when the URL points at Home Depot."""
+    return source_label_for_url(url) == "Home Depot"
+
+
+def extract_best_buy_sku(url):
+    """Extract a Best Buy SKU from common product URL shapes."""
+    parsed = urlparse(url)
+    query_match = re.search(r"(?:^|&)skuId=([0-9A-Za-z_-]+)", parsed.query)
+    if query_match:
+        return query_match.group(1)
+
+    path_match = re.search(r"/([0-9]{4,})\.p(?:/)?$", parsed.path)
+    if path_match:
+        return path_match.group(1)
+
+    any_path_match = re.search(r"/([0-9]{4,})\.p(?:/|$)", parsed.path)
+    if any_path_match:
+        return any_path_match.group(1)
+
+    return None
 
 
 def env_flag(name, default=False):
@@ -302,6 +387,11 @@ def current_usage_month():
     return datetime.now().strftime("%Y-%m")
 
 
+def current_usage_day():
+    """Calendar day key used for Crawlbase diagnostic request tracking."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
 def canopy_settings():
     """Read Canopy settings without ever printing the API key."""
     api_key = os.environ.get("CANOPY_API_KEY", "").strip()
@@ -313,6 +403,25 @@ def canopy_settings():
         "monthly_limit": env_int("CANOPY_MONTHLY_LIMIT", 100),
         "auth_header": os.environ.get("CANOPY_AUTH_HEADER", "API-KEY").strip() or "API-KEY",
         "interval_hours": env_int("AMAZON_CHECK_INTERVAL_HOURS", 24),
+    }
+
+
+def crawlbase_settings():
+    """Read Crawlbase settings without exposing tokens."""
+    normal_token = os.environ.get("CRAWLBASE_NORMAL_TOKEN", "").strip()
+    js_token = os.environ.get("CRAWLBASE_JS_TOKEN", "").strip()
+    if normal_token in {"replace_me", "replace_me_later"}:
+        normal_token = ""
+    if js_token in {"replace_me", "replace_me_later"}:
+        js_token = ""
+    return {
+        "enabled": env_flag("ENABLE_CRAWLBASE", False),
+        "normal_token": normal_token,
+        "js_token": js_token,
+        "daily_limit": env_int("CRAWLBASE_DAILY_LIMIT", 200),
+        "interval_hours": env_int("CRAWLBASE_CHECK_INTERVAL_HOURS", 24),
+        "default_country": os.environ.get("CRAWLBASE_DEFAULT_COUNTRY", "US").strip() or "US",
+        "use_js_fallback": env_flag("CRAWLBASE_USE_JS_FALLBACK", False),
     }
 
 
@@ -340,6 +449,20 @@ def api_usage_count(db, provider):
     return row["request_count"] if row else 0
 
 
+def api_usage_count_for_period(db, provider, period):
+    """Return request count for a provider and any period key."""
+    row = db.execute(
+        """
+        SELECT request_count
+        FROM api_usage
+        WHERE provider = ?
+          AND usage_month = ?
+        """,
+        (provider, period),
+    ).fetchone()
+    return row["request_count"] if row else 0
+
+
 def increment_api_usage(db, provider):
     """Count one actual external API request without losing existing rows."""
     db.execute(
@@ -352,6 +475,21 @@ def increment_api_usage(db, provider):
             last_request_at = CURRENT_TIMESTAMP
         """,
         (provider, current_usage_month()),
+    )
+
+
+def increment_api_usage_for_period(db, provider, period):
+    """Count one actual external API request for a specific period key."""
+    db.execute(
+        """
+        INSERT INTO api_usage (provider, usage_month, request_count, last_request_at)
+        VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(provider, usage_month)
+        DO UPDATE SET
+            request_count = request_count + 1,
+            last_request_at = CURRENT_TIMESTAMP
+        """,
+        (provider, period),
     )
 
 
@@ -683,6 +821,445 @@ def debug_canopy(asin):
         db.close()
 
 
+def crawlbase_debug_token(settings, use_js):
+    """Choose the Crawlbase token for a diagnostic request."""
+    if use_js:
+        return settings["js_token"], "JavaScript token"
+    return settings["normal_token"], "Normal token"
+
+
+def crawlbase_request_params(target_url, token, country, use_js, page_wait=None, ajax_wait=False):
+    """Build Crawlbase Crawling API query parameters.
+
+    Crawlbase documents the endpoint as:
+    https://api.crawlbase.com/?token=YOUR_TOKEN&url=ENCODED_URL
+
+    requests handles URL encoding for us when we pass params as a dict.
+    """
+    params = {
+        "token": token,
+        "url": target_url,
+    }
+    if country:
+        params["country"] = country
+    if use_js and page_wait is not None:
+        params["page_wait"] = str(page_wait)
+    if use_js and ajax_wait:
+        params["ajax_wait"] = "true"
+    return params
+
+
+def redacted_crawlbase_params(params):
+    """Return request params safe for logs/console."""
+    return {key: ("[redacted]" if key == "token" else value) for key, value in params.items()}
+
+
+def save_crawlbase_debug_files(body, metadata):
+    """Save last Crawlbase debug response and redacted metadata."""
+    log_dir = BASE_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    html_path = log_dir / "crawlbase_debug_last.html"
+    json_path = log_dir / "crawlbase_debug_last.json"
+    html_path.write_text(body, encoding="utf-8", errors="replace")
+    json_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return html_path, json_path
+
+
+def parse_json_ld_product(soup):
+    """Try JSON-LD product data first because it is the cleanest source."""
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        text = script.string or script.get_text(" ", strip=True)
+        if not text:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            graph_items = item.get("@graph")
+            if isinstance(graph_items, list):
+                items.extend(graph_items)
+            item_type = str(item.get("@type", "")).lower()
+            if "product" not in item_type:
+                continue
+            offers = item.get("offers") or {}
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+            return {
+                "title": item.get("name"),
+                "current_price": price_from_canopy_value(
+                    offers.get("price") if isinstance(offers, dict) else None
+                ),
+                "regular_price": None,
+                "availability": offers.get("availability") if isinstance(offers, dict) else None,
+                "source_url": item.get("url"),
+                "image_url": item.get("image")[0]
+                if isinstance(item.get("image"), list) and item.get("image")
+                else item.get("image"),
+            }
+    return {}
+
+
+def meta_content(soup, *names):
+    """Return the first matching meta content value."""
+    for name in names:
+        tag = soup.find("meta", attrs={"property": name}) or soup.find(
+            "meta", attrs={"name": name}
+        )
+        if tag and tag.get("content"):
+            return tag["content"].strip()
+    return None
+
+
+def visible_text_price(soup):
+    """Find a plausible visible price in common retail selectors."""
+    selectors = [
+        "[class*=priceView-customer-price]",
+        "[class*=customer-price]",
+        "[class*=sale-price]",
+        "[class*=price]",
+        "[data-testid*=price]",
+    ]
+    for selector in selectors:
+        for tag in soup.select(selector):
+            price = parse_price_text(tag.get_text(" ", strip=True))
+            if price is not None:
+                return price
+    return None
+
+
+def parse_best_buy_debug_html(html, source_url):
+    """Defensively parse Best Buy debug HTML for product info."""
+    soup = soup_from_html(html)
+    parsed = parse_json_ld_product(soup)
+    title = parsed.get("title") or meta_content(
+        soup, "og:title", "twitter:title", "title"
+    )
+    current_price = parsed.get("current_price")
+    if current_price is None:
+        current_price = price_from_canopy_value(
+            meta_content(soup, "product:price:amount", "price")
+        )
+    if current_price is None:
+        current_price = visible_text_price(soup)
+
+    regular_price = None
+    regular_text = soup.find(string=re.compile(r"Was\s+\$|Reg\.?\s+\$", re.IGNORECASE))
+    if regular_text:
+        regular_price = parse_price_text(regular_text)
+
+    availability = parsed.get("availability") or meta_content(soup, "availability")
+    if not availability:
+        availability_text = soup.find(
+            string=re.compile(r"in stock|sold out|unavailable|pickup|shipping", re.IGNORECASE)
+        )
+        availability = str(availability_text).strip() if availability_text else None
+
+    image_url = parsed.get("image_url") or meta_content(soup, "og:image", "twitter:image")
+    return {
+        "title": title,
+        "current_price": current_price,
+        "regular_price": regular_price,
+        "availability": availability,
+        "source_url": parsed.get("source_url") or source_url,
+        "image_url": image_url,
+    }
+
+
+def parse_generic_product_page(html, source_url):
+    """Parse common ecommerce fields from a fetched product page."""
+    soup = soup_from_html(html)
+    parsed = parse_json_ld_product(soup)
+    current_price = parsed.get("current_price")
+    if current_price is None:
+        current_price = price_from_canopy_value(
+            meta_content(soup, "product:price:amount", "og:price:amount", "price")
+        )
+    if current_price is None:
+        current_price = visible_text_price(soup)
+    return {
+        "title": parsed.get("title")
+        or meta_content(soup, "og:title", "twitter:title", "title"),
+        "current_price": current_price,
+        "currency": meta_content(soup, "product:price:currency", "og:price:currency"),
+        "availability": parsed.get("availability") or meta_content(soup, "availability"),
+        "source_url": parsed.get("source_url") or source_url,
+        "image_url": parsed.get("image_url") or meta_content(soup, "og:image", "twitter:image"),
+    }
+
+
+def parse_bestbuy_page(html, source_url):
+    """Best Buy parser adapter."""
+    return parse_best_buy_debug_html(html, source_url)
+
+
+def parse_target_page(html, source_url):
+    """Target parser placeholder using the generic parser for now."""
+    return parse_generic_product_page(html, source_url)
+
+
+def parse_walmart_page(html, source_url):
+    """Walmart parser placeholder using the generic parser for now."""
+    return parse_generic_product_page(html, source_url)
+
+
+def parse_homedepot_page(html, source_url):
+    """Home Depot parser placeholder using the generic parser for now."""
+    return parse_generic_product_page(html, source_url)
+
+
+def parse_newegg_page(html, source_url):
+    """Newegg parser placeholder using the generic parser for now."""
+    return parse_generic_product_page(html, source_url)
+
+
+def parse_product_page_for_url(html, source_url):
+    """Choose a store-specific parser when one exists."""
+    if is_best_buy_url(source_url):
+        return parse_bestbuy_page(html, source_url)
+    if is_target_url(source_url):
+        return parse_target_page(html, source_url)
+    if is_walmart_url(source_url):
+        return parse_walmart_page(html, source_url)
+    if is_home_depot_url(source_url):
+        return parse_homedepot_page(html, source_url)
+    if is_newegg_url(source_url):
+        return parse_newegg_page(html, source_url)
+    return parse_generic_product_page(html, source_url)
+
+
+def crawlbase_due_status(db, product_id, interval_hours):
+    """Return whether scheduled Crawlbase checking is due."""
+    if interval_hours <= 0:
+        return True, "Crawlbase check is due because the interval is 0 hours."
+    row = db.execute(
+        """
+        SELECT checked_at,
+               (julianday('now') - julianday(checked_at)) * 24.0 AS age_hours
+        FROM price_checks
+        WHERE product_id = ?
+          AND source_name LIKE '%Crawlbase%'
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (product_id,),
+    ).fetchone()
+    if row is None:
+        return True, "Crawlbase check is due because it has not been tried yet."
+    age_hours = row["age_hours"] if row["age_hours"] is not None else interval_hours
+    if age_hours >= interval_hours:
+        return True, f"Crawlbase check is due; last attempt was {age_hours:.1f} hour(s) ago."
+    return (
+        False,
+        f"Crawlbase check is not due yet; last attempt was {age_hours:.1f} hour(s) ago "
+        f"and the interval is {interval_hours} hour(s).",
+    )
+
+
+def crawlbase_available(db, use_js):
+    """Check Crawlbase config, token, and daily budget."""
+    settings = crawlbase_settings()
+    token, token_label = crawlbase_debug_token(settings, use_js)
+    usage_day = current_usage_day()
+    usage_count = api_usage_count_for_period(db, CRAWLBASE_PROVIDER, usage_day)
+    if not settings["enabled"]:
+        return False, "Crawlbase fallback is not enabled.", settings, token, token_label
+    if not token:
+        return False, f"Crawlbase {token_label.lower()} is missing.", settings, token, token_label
+    if usage_count >= settings["daily_limit"]:
+        return (
+            False,
+            f"Crawlbase daily limit reached ({usage_count}/{settings['daily_limit']}).",
+            settings,
+            token,
+            token_label,
+        )
+    return True, "", settings, token, token_label
+
+
+def fetch_crawlbase_html(db, url, use_js=False, page_wait=None, ajax_wait=False):
+    """Fetch product HTML through Crawlbase and count actual requests."""
+    available, reason, settings, token, token_label = crawlbase_available(db, use_js)
+    if not available:
+        raise ProductFetchError(reason)
+    params = crawlbase_request_params(
+        url,
+        token,
+        settings["default_country"],
+        use_js,
+        page_wait=page_wait,
+        ajax_wait=ajax_wait,
+    )
+    try:
+        import requests
+    except ImportError as error:
+        raise ProductFetchError(
+            "The requests package is missing. Run pip install -r requirements.txt."
+        ) from error
+    increment_api_usage_for_period(db, CRAWLBASE_PROVIDER, current_usage_day())
+    try:
+        response = requests.get("https://api.crawlbase.com/", params=params, timeout=90)
+    except requests.Timeout as error:
+        raise ProductFetchError("Crawlbase request timed out.") from error
+    except requests.RequestException as error:
+        raise ProductFetchError("Crawlbase request failed.") from error
+    if response.status_code >= 400:
+        raise ProductFetchError(f"Crawlbase returned HTTP {response.status_code}.")
+    return response.text, token_label
+
+
+def fetch_product_with_crawlbase(db, url, use_js=False):
+    """Fetch and parse one product URL through Crawlbase."""
+    html, token_label = fetch_crawlbase_html(db, url, use_js=use_js, page_wait=3000 if use_js else None)
+    parsed = parse_product_page_for_url(html, url)
+    if parsed.get("current_price") is None:
+        raise ProductFetchError("Crawlbase fetched the page, but DadDeals could not find a price yet.")
+    method = "crawlbase_js" if use_js else "crawlbase_normal"
+    source_prefix = source_label_for_url(url)
+    source_name = f"{source_prefix} via Crawlbase"
+    return {
+        "current_price": parsed["current_price"],
+        "source_url": parsed.get("source_url") or url,
+        "source_name": source_name,
+        "method": method,
+        "message": (
+            f"Crawlbase {'JS' if use_js else 'normal'} check completed."
+            + (f" Title: {parsed['title']}." if parsed.get("title") else "")
+            + (f" Availability: {parsed['availability']}." if parsed.get("availability") else "")
+        ),
+    }
+
+
+def debug_crawlbase_url(target_url, use_js=False, country=None, page_wait=None, ajax_wait=False):
+    """Run one Crawlbase diagnostic fetch without changing product checks."""
+    settings = crawlbase_settings()
+    country = country or settings["default_country"]
+    source_label = source_label_for_url(target_url)
+    sku = extract_best_buy_sku(target_url) if is_best_buy_url(target_url) else None
+    token, token_label = crawlbase_debug_token(settings, use_js)
+    usage_day = current_usage_day()
+
+    print("DadDeals Crawlbase debug")
+    print(f"Crawlbase enabled: {'yes' if settings['enabled'] else 'no'}")
+    print(f"Normal token present: {'yes' if bool(settings['normal_token']) else 'no'}")
+    print(f"JS token present: {'yes' if bool(settings['js_token']) else 'no'}")
+    print(f"Daily limit: {settings['daily_limit']}")
+    print(f"Check interval setting: {settings['interval_hours']} hour(s)")
+    print(f"Default country: {settings['default_country']}")
+    print(f"Detected source: {source_label}")
+    if sku:
+        print(f"Best Buy SKU: {sku}")
+    print(f"Token mode: {token_label}")
+    print(f"Target URL: {target_url}")
+
+    if not settings["enabled"]:
+        print("Crawlbase is disabled. Set ENABLE_CRAWLBASE=true to make a debug request.")
+        return False
+    if not token:
+        print(f"Required {token_label.lower()} is missing or still a placeholder.")
+        return False
+
+    db = connect_db()
+    try:
+        init_db(db)
+        usage_count = api_usage_count_for_period(db, CRAWLBASE_PROVIDER, usage_day)
+        print(f"Crawlbase usage today: {usage_count} / {settings['daily_limit']} ({usage_day})")
+        if usage_count >= settings["daily_limit"]:
+            print("Crawlbase daily limit reached. No request was made.")
+            return False
+
+        params = crawlbase_request_params(
+            target_url,
+            token,
+            country,
+            use_js,
+            page_wait=page_wait,
+            ajax_wait=ajax_wait,
+        )
+        print("Crawlbase request params:")
+        print(json.dumps(redacted_crawlbase_params(params), indent=2))
+
+        try:
+            import requests
+        except ImportError:
+            print("The requests package is missing. Run pip install -r requirements.txt.")
+            return False
+
+        increment_api_usage_for_period(db, CRAWLBASE_PROVIDER, usage_day)
+        try:
+            response = requests.get(
+                "https://api.crawlbase.com/",
+                params=params,
+                timeout=90,
+                headers={"Accept-Encoding": "gzip"},
+            )
+            db.commit()
+        except requests.Timeout:
+            db.commit()
+            print("Crawlbase request timed out after 90 seconds.")
+            return False
+        except requests.RequestException as error:
+            db.commit()
+            print(f"Crawlbase request failed: {error.__class__.__name__}")
+            return False
+
+        content_type = response.headers.get("content-type", "unknown")
+        body = response.text
+        metadata = {
+            "target_url": target_url,
+            "source_label": source_label,
+            "best_buy_sku": sku,
+            "use_js": use_js,
+            "country": country,
+            "page_wait": page_wait,
+            "ajax_wait": ajax_wait,
+            "request_params": redacted_crawlbase_params(params),
+            "http_status": response.status_code,
+            "content_type": content_type,
+            "response_length": len(response.content),
+            "crawlbase_headers": {
+                key: value
+                for key, value in response.headers.items()
+                if key.lower() in {"pc_status", "original_status", "url", "rid", "remaining"}
+            },
+        }
+        html_path, json_path = save_crawlbase_debug_files(body, metadata)
+
+        print(f"HTTP status code: {response.status_code}")
+        print(f"Content type: {content_type}")
+        print(f"Response length: {len(response.content)} bytes")
+        print(f"Saved response body to {html_path}")
+        print(f"Saved redacted metadata to {json_path}")
+
+        if is_best_buy_url(target_url):
+            parsed = parse_best_buy_debug_html(body, target_url)
+            print("Best Buy parse attempt:")
+            print(f"  Title: {parsed['title'] or 'not found'}")
+            print(
+                f"  Current price: "
+                f"{('$%.2f' % parsed['current_price']) if parsed['current_price'] is not None else 'not found'}"
+            )
+            print(
+                f"  Regular price: "
+                f"{('$%.2f' % parsed['regular_price']) if parsed['regular_price'] is not None else 'not found'}"
+            )
+            print(f"  Availability: {parsed['availability'] or 'not found'}")
+            print(f"  Source URL: {parsed['source_url'] or target_url}")
+            print(f"  Image URL: {parsed['image_url'] or 'not found'}")
+            if parsed["current_price"] is None:
+                print("Crawlbase fetched the page, but DadDeals could not parse a price yet.")
+        else:
+            print("Parsing is only attempted for Best Buy in this diagnostic phase.")
+
+        return response.status_code < 500
+    finally:
+        db.close()
+
+
 def clean_ticker(ticker):
     """Normalize ticker text before sending it to yfinance."""
     return ticker.strip().upper()
@@ -987,6 +1564,8 @@ def save_product_check(
     target_price,
     status,
     message,
+    method=None,
+    detected_store=None,
 ):
     """Insert one product check row."""
     db.execute(
@@ -1007,6 +1586,16 @@ def save_product_check(
             status,
             message,
         ),
+    )
+    db.execute(
+        """
+        UPDATE tracked_products
+        SET last_check_method = COALESCE(?, last_check_method),
+            last_detected_store = COALESCE(?, last_detected_store),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (method, detected_store, product["id"]),
     )
 
 
@@ -1057,6 +1646,205 @@ def product_result(name, current_price, previous_price, alerts_created, messages
     }
 
 
+def row_value(row, key, default=None):
+    """Read sqlite.Row values safely across migrated and older databases."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
+
+
+def product_allows_crawlbase(product):
+    """Return True when a product explicitly allows Crawlbase fallback."""
+    return bool(row_value(product, "allow_crawlbase_fallback", 0))
+
+
+def product_prefers_crawlbase(product):
+    """Return True when a product prefers Crawlbase first."""
+    return bool(row_value(product, "prefer_crawlbase", 0))
+
+
+def crawlbase_should_try(db, product, force, explicit=False):
+    """Check Crawlbase interval/budget/config before a product check attempt."""
+    settings = crawlbase_settings()
+    if not force:
+        due, due_message = crawlbase_due_status(db, product["id"], settings["interval_hours"])
+        if not due:
+            raise ProductFetchError(due_message)
+    use_js = settings["use_js_fallback"] and not is_best_buy_url(product["url"])
+    available, reason, _settings, _token, _label = crawlbase_available(db, use_js)
+    if not available:
+        if explicit or product_allows_crawlbase(product) or product_prefers_crawlbase(product):
+            raise ProductFetchError(f"Crawlbase fallback is not available. {reason} Open the product page manually.")
+        raise ProductFetchError(reason)
+    return use_js
+
+
+def try_crawlbase_product(db, product, force=False, explicit=False):
+    """Fetch one product with Crawlbase and convert failures to ProductFetchError."""
+    use_js = crawlbase_should_try(db, product, force, explicit=explicit)
+    return fetch_product_with_crawlbase(db, product["url"], use_js=use_js)
+
+
+def save_failed_product_check(
+    db,
+    product,
+    source_name,
+    source_url,
+    previous_price,
+    target_price,
+    message,
+    method,
+    detected_store,
+    dry_run,
+    status="failed",
+):
+    """Store one failed product check unless this is a dry run."""
+    if not dry_run:
+        save_product_check(
+            db,
+            product,
+            source_name,
+            source_url,
+            None,
+            previous_price,
+            target_price,
+            status,
+            message,
+            method=method,
+            detected_store=detected_store,
+        )
+    return product_result(product["name"], None, previous_price, 0, [message], status)
+
+
+def save_successful_product_check(
+    db,
+    product,
+    current_price,
+    previous_price,
+    target_price,
+    source_name,
+    source_url,
+    message,
+    method,
+    detected_store,
+    dry_run,
+):
+    """Store a successful product check and create any matching alerts."""
+    if not dry_run:
+        save_product_check(
+            db,
+            product,
+            source_name,
+            source_url,
+            current_price,
+            previous_price,
+            target_price,
+            "ok",
+            message,
+            method=method,
+            detected_store=detected_store,
+        )
+
+    alerts_created, messages = check_product_alerts(
+        db, product, current_price, previous_price, target_price, source_url, dry_run
+    )
+    return product_result(
+        product["name"],
+        current_price,
+        previous_price,
+        alerts_created,
+        messages or [message],
+        "ok",
+    )
+
+
+def check_crawlbase_only_product(db, product, dry_run, force=False):
+    """Run one explicit Crawlbase retry for a product."""
+    previous_price = latest_product_price(db, product["id"])
+    target_price = product["target_price"]
+    detected_store = source_label_for_url(product["url"])
+    settings = crawlbase_settings()
+    method = "crawlbase_js" if settings["use_js_fallback"] and not is_best_buy_url(product["url"]) else "crawlbase_normal"
+
+    if dry_run:
+        message = "Dry run only: Crawlbase retry would be attempted, but no Crawlbase request was made."
+        return product_result(product["name"], None, previous_price, 0, [message], "skipped")
+
+    try:
+        crawlbase_product = try_crawlbase_product(db, product, force=force, explicit=True)
+    except ProductFetchError as error:
+        message = f"Crawlbase retry failed: {error}"
+        return save_failed_product_check(
+            db,
+            product,
+            "Crawlbase",
+            product["url"],
+            previous_price,
+            target_price,
+            message,
+            method,
+            detected_store,
+            dry_run,
+        )
+
+    return save_successful_product_check(
+        db,
+        product,
+        crawlbase_product["current_price"],
+        previous_price,
+        target_price,
+        crawlbase_product["source_name"],
+        crawlbase_product["source_url"],
+        crawlbase_product["message"],
+        crawlbase_product["method"],
+        detected_store,
+        dry_run,
+    )
+
+
+def try_amazon_crawlbase_fallback(db, product, previous_price, target_price, prior_message, dry_run, force):
+    """Try Crawlbase for Amazon only when the product explicitly allows it."""
+    if not (product_allows_crawlbase(product) or product_prefers_crawlbase(product)):
+        return None
+
+    detected_store = "Amazon"
+    if dry_run:
+        message = f"{prior_message} Dry run only: Crawlbase fallback would be attempted, but no Crawlbase request was made."
+        return product_result(product["name"], None, previous_price, 0, [message], "skipped")
+
+    try:
+        crawlbase_product = try_crawlbase_product(db, product, force=force, explicit=True)
+    except ProductFetchError as error:
+        message = f"{prior_message} Crawlbase fallback failed: {error}"
+        return save_failed_product_check(
+            db,
+            product,
+            "Amazon via Crawlbase",
+            product["url"],
+            previous_price,
+            target_price,
+            message,
+            "crawlbase_fallback",
+            detected_store,
+            dry_run,
+        )
+
+    return save_successful_product_check(
+        db,
+        product,
+        crawlbase_product["current_price"],
+        previous_price,
+        target_price,
+        crawlbase_product["source_name"],
+        crawlbase_product["source_url"],
+        crawlbase_product["message"],
+        crawlbase_product["method"],
+        detected_store,
+        dry_run,
+    )
+
+
 def check_amazon_product(db, product, dry_run, force=False):
     """Check an Amazon product with optional Canopy support."""
     current_price = None
@@ -1077,6 +1865,8 @@ def check_amazon_product(db, product, dry_run, force=False):
                 target_price,
                 "failed",
                 message,
+                method="amazon_canopy",
+                detected_store="Amazon",
             )
         return product_result(product["name"], current_price, previous_price, 0, [message], "failed")
 
@@ -1097,6 +1887,11 @@ def check_amazon_product(db, product, dry_run, force=False):
         else:
             reason = f"Canopy monthly limit reached ({usage_count}/{settings['monthly_limit']})."
         message = f"{AMAZON_MANUAL_MESSAGE} {reason} ASIN: {asin}."
+        fallback_result = try_amazon_crawlbase_fallback(
+            db, product, previous_price, target_price, message, dry_run, force
+        )
+        if fallback_result is not None:
+            return fallback_result
         if not dry_run:
             save_product_check(
                 db,
@@ -1108,6 +1903,8 @@ def check_amazon_product(db, product, dry_run, force=False):
                 target_price,
                 "skipped",
                 message,
+                method="amazon_canopy",
+                detected_store="Amazon",
             )
         return product_result(product["name"], current_price, previous_price, 0, [message], "skipped")
 
@@ -1127,6 +1924,11 @@ def check_amazon_product(db, product, dry_run, force=False):
         status = "ok"
     except ProductFetchError as error:
         message = str(error)
+        fallback_result = try_amazon_crawlbase_fallback(
+            db, product, previous_price, target_price, message, dry_run, force
+        )
+        if fallback_result is not None:
+            return fallback_result
         save_product_check(
             db,
             product,
@@ -1137,6 +1939,8 @@ def check_amazon_product(db, product, dry_run, force=False):
             target_price,
             "failed",
             message,
+            method="amazon_canopy",
+            detected_store="Amazon",
         )
         return product_result(product["name"], current_price, previous_price, 0, [message], "failed")
 
@@ -1150,6 +1954,8 @@ def check_amazon_product(db, product, dry_run, force=False):
         target_price,
         status,
         check_message,
+        method="amazon_canopy",
+        detected_store="Amazon",
     )
     alerts_created, messages = check_product_alerts(
         db, product, current_price, previous_price, target_price, source_url, dry_run
@@ -1164,65 +1970,105 @@ def check_amazon_product(db, product, dry_run, force=False):
     )
 
 
-def check_product(db, product, dry_run, force=False):
+def check_product(db, product, dry_run, force=False, force_crawlbase=False):
     """Route Amazon URLs to Canopy support and other URLs to the exact checker."""
+    if force_crawlbase:
+        return check_crawlbase_only_product(db, product, dry_run, force=force)
     if is_amazon_url(product["url"]):
         return check_amazon_product(db, product, dry_run, force=force)
-    return check_exact_product(db, product, dry_run)
+    return check_exact_product(db, product, dry_run, force=force)
 
 
-def check_exact_product(db, product, dry_run):
-    """Fetch and store one exact-URL product check."""
+def check_exact_product(db, product, dry_run, force=False):
+    """Fetch and store one non-Amazon product check."""
     current_price = None
     previous_price = latest_product_price(db, product["id"])
     target_price = product["target_price"]
+    source_name = product_source_name(product["url"])
+    source_url = product["url"]
+    detected_store = source_label_for_url(product["url"])
+    method = "normal"
+    check_message = "Exact URL product check completed."
+    normal_error = None
 
-    try:
-        current_price = fetch_product_price(product["url"])
-        status = "ok"
-        check_message = "Exact URL product check completed."
-    except ProductFetchError as error:
-        status = "failed"
-        check_message = str(error)
+    should_prefer_crawlbase = product_prefers_crawlbase(product) or is_best_buy_url(product["url"])
+    if should_prefer_crawlbase:
+        if dry_run:
+            normal_error = (
+                "Dry run only: Crawlbase would be used first for this product, "
+                "but no Crawlbase request was made."
+            )
+        else:
+            try:
+                crawlbase_product = try_crawlbase_product(db, product, force=force)
+                current_price = crawlbase_product["current_price"]
+                source_name = crawlbase_product["source_name"]
+                source_url = crawlbase_product["source_url"]
+                method = crawlbase_product["method"]
+                check_message = crawlbase_product["message"]
+            except ProductFetchError as error:
+                normal_error = str(error)
+
+    if current_price is None:
+        try:
+            current_price = fetch_product_price(product["url"])
+            source_name = product_source_name(product["url"])
+            source_url = product["url"]
+            method = "normal"
+            check_message = "Exact URL product check completed."
+        except ProductFetchError as error:
+            normal_error = str(error)
+
+    if current_price is None and product_allows_crawlbase(product) and not should_prefer_crawlbase:
+        if dry_run:
+            normal_error = (
+                f"{normal_error} Crawlbase fallback would be attempted on --run, "
+                "but no Crawlbase request was made."
+            )
+        else:
+            try:
+                crawlbase_product = try_crawlbase_product(db, product, force=force)
+                current_price = crawlbase_product["current_price"]
+                source_name = crawlbase_product["source_name"]
+                source_url = crawlbase_product["source_url"]
+                method = crawlbase_product["method"]
+                check_message = crawlbase_product["message"]
+            except ProductFetchError as error:
+                normal_error = f"{normal_error} Crawlbase fallback: {error}"
+
+    if current_price is None:
+        status = "skipped" if dry_run and should_prefer_crawlbase else "failed"
+        check_message = normal_error or "No product price was found."
 
         if not dry_run:
             save_product_check(
                 db,
                 product,
-                product_source_name(product["url"]),
-                product["url"],
+                source_name,
+                source_url,
                 current_price,
                 previous_price,
                 target_price,
                 status,
                 check_message,
+                method=method,
+                detected_store=detected_store,
             )
 
         return product_result(product["name"], current_price, previous_price, 0, [check_message], status)
 
-    if not dry_run:
-        save_product_check(
-            db,
-            product,
-            product_source_name(product["url"]),
-            product["url"],
-            current_price,
-            previous_price,
-            target_price,
-            status,
-            check_message,
-        )
-
-    alerts_created, messages = check_product_alerts(
-        db, product, current_price, previous_price, target_price, product["url"], dry_run
-    )
-    return product_result(
-        product["name"],
+    return save_successful_product_check(
+        db,
+        product,
         current_price,
         previous_price,
-        alerts_created,
-        messages,
-        status,
+        target_price,
+        source_name,
+        source_url,
+        check_message,
+        method,
+        detected_store,
+        dry_run,
     )
 
 
@@ -1399,6 +2245,65 @@ def run_worker(dry_run):
         db.close()
 
 
+def latest_timestamp(db, table_name, column_name):
+    """Return the latest timestamp from a table."""
+    row = db.execute(f"SELECT MAX({column_name}) AS latest FROM {table_name}").fetchone()
+    return row["latest"] if row and row["latest"] else "none"
+
+
+def health_check():
+    """Print a small DadDeals status summary for maintenance."""
+    db = connect_db()
+    try:
+        init_db(db)
+        print("DadDeals health")
+        print(f"Database reachable: yes ({database_path()})")
+
+        token, chat_id = telegram_settings()
+        print(f"Telegram configured: {'yes' if token and chat_id else 'no'}")
+
+        canopy = canopy_settings()
+        canopy_usage = api_usage_count(db, CANOPY_PROVIDER)
+        print(f"Canopy Amazon enabled: {'yes' if canopy['enabled'] else 'no'}")
+        print(f"Canopy API key present: {'yes' if bool(canopy['api_key']) else 'no'}")
+        print(
+            f"Canopy usage this month: {canopy_usage} / {canopy['monthly_limit']} "
+            f"({current_usage_month()})"
+        )
+
+        crawlbase = crawlbase_settings()
+        crawlbase_usage = api_usage_count_for_period(
+            db, CRAWLBASE_PROVIDER, current_usage_day()
+        )
+        print(f"Crawlbase enabled: {'yes' if crawlbase['enabled'] else 'no'}")
+        print(f"Crawlbase normal token present: {'yes' if bool(crawlbase['normal_token']) else 'no'}")
+        print(f"Crawlbase JS token present: {'yes' if bool(crawlbase['js_token']) else 'no'}")
+        print(f"Crawlbase JS fallback: {'yes' if crawlbase['use_js_fallback'] else 'no'}")
+        print(
+            f"Crawlbase usage today: {crawlbase_usage} / {crawlbase['daily_limit']} "
+            f"({current_usage_day()})"
+        )
+        print(f"Crawlbase default country: {crawlbase['default_country']}")
+
+        active_products = db.execute(
+            "SELECT COUNT(*) AS count FROM tracked_products WHERE status = 'active'"
+        ).fetchone()["count"]
+        active_stocks = db.execute(
+            "SELECT COUNT(*) AS count FROM tracked_stocks WHERE status = 'active'"
+        ).fetchone()["count"]
+        print(f"Active products: {active_products}")
+        print(f"Active stocks: {active_stocks}")
+        print(f"Last product check: {latest_timestamp(db, 'price_checks', 'checked_at')}")
+        print(f"Last stock check: {latest_timestamp(db, 'stock_checks', 'checked_at')}")
+        print(f"Last alert: {latest_timestamp(db, 'alerts', 'created_at')}")
+        return True
+    except sqlite3.Error as error:
+        print(f"Database reachable: no ({short_error(str(error))})")
+        return False
+    finally:
+        db.close()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the DadDeals simulated worker once.")
     parser.add_argument("--dry-run", action="store_true", help="Preview checks without saving.")
@@ -1406,24 +2311,49 @@ def parse_args():
     parser.add_argument("--send-alerts", action="store_true", help="Send unsent Telegram alerts.")
     parser.add_argument("--test-telegram", action="store_true", help="Send one Telegram test message.")
     parser.add_argument("--debug-canopy", metavar="ASIN", help="Debug one Canopy Amazon product request.")
+    parser.add_argument("--debug-crawlbase-url", metavar="URL", help="Debug one Crawlbase product page fetch.")
+    parser.add_argument("--js", action="store_true", help="Use Crawlbase JavaScript token for --debug-crawlbase-url.")
+    parser.add_argument("--country", help="Crawlbase country code for --debug-crawlbase-url.")
+    parser.add_argument("--page-wait", type=int, help="Crawlbase JS page_wait in milliseconds.")
+    parser.add_argument("--ajax-wait", action="store_true", help="Use Crawlbase JS ajax_wait for --debug-crawlbase-url.")
+    parser.add_argument("--health", action="store_true", help="Print DadDeals maintenance status.")
     args = parser.parse_args()
 
-    if args.dry_run and (args.run or args.send_alerts or args.test_telegram or args.debug_canopy):
+    if args.dry_run and (
+        args.run
+        or args.send_alerts
+        or args.test_telegram
+        or args.debug_canopy
+        or args.debug_crawlbase_url
+        or args.health
+    ):
         parser.error("--dry-run cannot be combined with other worker actions.")
-    if args.test_telegram and (args.run or args.send_alerts or args.debug_canopy):
+    if args.test_telegram and (
+        args.run or args.send_alerts or args.debug_canopy or args.debug_crawlbase_url or args.health
+    ):
         parser.error("--test-telegram must be run by itself.")
-    if args.debug_canopy and (args.run or args.send_alerts):
+    if args.debug_canopy and (args.run or args.send_alerts or args.debug_crawlbase_url or args.health):
         parser.error("--debug-canopy must be run by itself.")
+    if args.debug_crawlbase_url and (args.run or args.send_alerts or args.health):
+        parser.error("--debug-crawlbase-url must be run by itself.")
+    if not args.debug_crawlbase_url and (args.js or args.country or args.page_wait or args.ajax_wait):
+        parser.error("--js, --country, --page-wait, and --ajax-wait require --debug-crawlbase-url.")
+    if (args.page_wait is not None or args.ajax_wait) and args.debug_crawlbase_url and not args.js:
+        parser.error("--page-wait and --ajax-wait require --js with --debug-crawlbase-url.")
+    if args.health and (args.run or args.send_alerts):
+        parser.error("--health must be run by itself.")
     if (
         not args.dry_run
         and not args.run
         and not args.send_alerts
         and not args.test_telegram
         and not args.debug_canopy
+        and not args.debug_crawlbase_url
+        and not args.health
     ):
         parser.error(
             "Choose --dry-run, --run, --send-alerts, --run --send-alerts, "
-            "--test-telegram, or --debug-canopy ASIN."
+            "--test-telegram, --debug-canopy ASIN, --debug-crawlbase-url URL, or --health."
         )
 
     return args
@@ -1440,6 +2370,22 @@ def main():
 
     if args.debug_canopy:
         sys.exit(0 if debug_canopy(args.debug_canopy) else 1)
+
+    if args.debug_crawlbase_url:
+        sys.exit(
+            0
+            if debug_crawlbase_url(
+                args.debug_crawlbase_url,
+                use_js=args.js,
+                country=args.country,
+                page_wait=args.page_wait,
+                ajax_wait=args.ajax_wait,
+            )
+            else 1
+        )
+
+    if args.health:
+        sys.exit(0 if health_check() else 1)
 
     if args.run:
         run_worker(dry_run=False)

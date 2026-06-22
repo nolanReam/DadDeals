@@ -109,6 +109,7 @@ def init_db():
         db.executescript(file.read())
     migrate_alert_delivery_columns(db)
     migrate_price_check_columns(db)
+    migrate_product_crawlbase_columns(db)
     db.commit()
 
 
@@ -142,7 +143,11 @@ def schema_needs_upgrade():
     if required_tables != existing_tables:
         return True
 
-    return alert_delivery_columns_missing(db) or price_check_columns_missing(db)
+    return (
+        alert_delivery_columns_missing(db)
+        or price_check_columns_missing(db)
+        or product_crawlbase_columns_missing(db)
+    )
 
 
 def alert_delivery_columns_missing(db):
@@ -202,6 +207,39 @@ def migrate_price_check_columns(db):
         WHERE source_url IS NULL
         """
     )
+
+
+def product_crawlbase_columns_missing(db):
+    """Return True when product rows need Phase 2F Crawlbase settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    required_columns = {
+        "allow_crawlbase_fallback",
+        "prefer_crawlbase",
+        "last_check_method",
+        "last_detected_store",
+    }
+    return not required_columns.issubset(existing_columns)
+
+
+def migrate_product_crawlbase_columns(db):
+    """Add Crawlbase product options to older databases without touching saved rows."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    if "allow_crawlbase_fallback" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN allow_crawlbase_fallback INTEGER NOT NULL DEFAULT 0"
+        )
+    if "prefer_crawlbase" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN prefer_crawlbase INTEGER NOT NULL DEFAULT 0"
+        )
+    if "last_check_method" not in existing_columns:
+        db.execute("ALTER TABLE tracked_products ADD COLUMN last_check_method TEXT")
+    if "last_detected_store" not in existing_columns:
+        db.execute("ALTER TABLE tracked_products ADD COLUMN last_detected_store TEXT")
 
 
 def linkify_urls(value):
@@ -299,6 +337,24 @@ def checkbox_value(name):
     return 1 if request.form.get(name) == "on" else 0
 
 
+def detected_store_label(url):
+    """Return a Dad-friendly store label for a product URL."""
+    host = urlparse(url).netloc.lower()
+    if "amazon." in host:
+        return "Amazon"
+    if "bestbuy." in host:
+        return "Best Buy"
+    if "target." in host:
+        return "Target"
+    if "walmart." in host:
+        return "Walmart"
+    if "homedepot." in host:
+        return "Home Depot"
+    if "newegg." in host:
+        return "Newegg"
+    return "Other website"
+
+
 def clean_status():
     """Only allow statuses the UI knows how to display."""
     status = request.form.get("status", "active")
@@ -343,7 +399,10 @@ def product_form_data():
         "notify_on_target": checkbox_value("notify_on_target"),
         "notify_on_big_drop": checkbox_value("notify_on_big_drop"),
         "status": clean_status(),
+        "allow_crawlbase_fallback": checkbox_value("allow_crawlbase_fallback"),
+        "prefer_crawlbase": checkbox_value("prefer_crawlbase"),
     }
+    data["detected_store"] = detected_store_label(data["url"])
     return data, errors
 
 
@@ -428,6 +487,34 @@ def canopy_status(db):
     }
 
 
+def crawlbase_status(db):
+    """Return Crawlbase diagnostic settings without exposing tokens."""
+    usage_day = datetime.now().strftime("%Y-%m-%d")
+    row = db.execute(
+        """
+        SELECT request_count
+        FROM api_usage
+        WHERE provider = 'crawlbase'
+          AND usage_month = ?
+        """,
+        (usage_day,),
+    ).fetchone()
+    normal_token = os.environ.get("CRAWLBASE_NORMAL_TOKEN", "").strip()
+    js_token = os.environ.get("CRAWLBASE_JS_TOKEN", "").strip()
+    placeholder_values = {"", "replace_me", "replace_me_later"}
+    return {
+        "enabled": env_flag("ENABLE_CRAWLBASE", False),
+        "normal_token_present": normal_token not in placeholder_values,
+        "js_token_present": js_token not in placeholder_values,
+        "usage_day": usage_day,
+        "request_count": row["request_count"] if row else 0,
+        "daily_limit": env_int("CRAWLBASE_DAILY_LIMIT", 200),
+        "check_interval_hours": env_int("CRAWLBASE_CHECK_INTERVAL_HOURS", 24),
+        "default_country": os.environ.get("CRAWLBASE_DEFAULT_COUNTRY", "US").strip() or "US",
+        "use_js_fallback": env_flag("CRAWLBASE_USE_JS_FALLBACK", False),
+    }
+
+
 def datetime_month():
     """Return the current calendar month key used for local API usage tracking."""
     from datetime import datetime
@@ -470,6 +557,21 @@ def worker_log_summary():
         "last_modified": log_file.stat().st_mtime,
         "last_status": last_status,
         "tail": lines[-8:],
+    }
+
+
+def backup_summary():
+    """Return simple backup-folder status for Settings."""
+    backup_dir = BASE_DIR / "backups"
+    backup_files = sorted(backup_dir.glob("daddeals-*.db"), reverse=True)
+    latest_backup = backup_files[0] if backup_files else None
+    return {
+        "exists": backup_dir.exists(),
+        "path": str(backup_dir),
+        "latest": latest_backup,
+        "latest_time": datetime.fromtimestamp(latest_backup.stat().st_mtime, timezone.utc)
+        if latest_backup
+        else None,
     }
 
 
@@ -613,12 +715,18 @@ def attach_product_summaries(db, products):
     return products
 
 
-def run_single_product_check(db, product, force=False):
+def run_single_product_check(db, product, force=False, force_crawlbase=False):
     """Run one product check from the web app without checking every product."""
     from worker import ProductFetchError, check_product
 
     try:
-        result = check_product(db, product, dry_run=False, force=force)
+        result = check_product(
+            db,
+            product,
+            dry_run=False,
+            force=force,
+            force_crawlbase=force_crawlbase,
+        )
         db.commit()
         return result, None
     except ProductFetchError as error:
@@ -767,14 +875,16 @@ def register_routes(app):
         return render_template(
             "settings.html",
             page_title="Settings",
-            phase_label="DadDeals v2C.1 - local time and retry polish",
+            phase_label="DadDeals v2F - Crawlbase fallback",
             telegram_ready=telegram_config_present(),
             database_path=database_path(),
             last_worker_run=latest_worker_run_time(db),
             worker_log=worker_log_summary(),
             alert_count=alert_count,
             canopy=canopy_status(db),
+            crawlbase=crawlbase_status(db),
             app_timezone=os.environ.get("APP_TIMEZONE", "America/Los_Angeles"),
+            backup=backup_summary(),
         )
 
     @app.route("/alerts/clear-old", methods=["POST"])
@@ -873,7 +983,10 @@ def register_routes(app):
             if errors:
                 flash_errors(errors)
                 return render_template(
-                    "add_product.html", page_title="Add Product", form=data
+                    "add_product.html",
+                    page_title="Add Product",
+                    form=data,
+                    detected_store=data.get("detected_store", "Other website"),
                 )
 
             db = get_db()
@@ -881,9 +994,10 @@ def register_routes(app):
                 """
                 INSERT INTO tracked_products (
                     name, url, target_price, big_drop_percent,
-                    notify_on_target, notify_on_big_drop, status
+                    notify_on_target, notify_on_big_drop, status,
+                    allow_crawlbase_fallback, prefer_crawlbase, last_detected_store
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["name"],
@@ -893,6 +1007,9 @@ def register_routes(app):
                     data["notify_on_target"],
                     data["notify_on_big_drop"],
                     data["status"],
+                    data["allow_crawlbase_fallback"],
+                    data["prefer_crawlbase"],
+                    data["detected_store"],
                 ),
             )
             db.commit()
@@ -908,7 +1025,12 @@ def register_routes(app):
                 flash_initial_delivery_result(delivery_result)
             return redirect(url_for("dashboard"))
 
-        return render_template("add_product.html", page_title="Add Product", form={})
+        return render_template(
+            "add_product.html",
+            page_title="Add Product",
+            form={},
+            detected_store="Other website",
+        )
 
     @app.route("/products/<int:product_id>")
     @login_required
@@ -939,6 +1061,20 @@ def register_routes(app):
         db = get_db()
         product = get_product_or_404(product_id)
         result, error = run_single_product_check(db, product, force=True)
+        flash_product_check_result(product["name"], result, error)
+        return redirect(request.referrer or url_for("product_detail", product_id=product_id))
+
+    @app.route("/products/<int:product_id>/retry-crawlbase", methods=["POST"])
+    @login_required
+    def retry_product_check_with_crawlbase(product_id):
+        db = get_db()
+        product = get_product_or_404(product_id)
+        result, error = run_single_product_check(
+            db,
+            product,
+            force=True,
+            force_crawlbase=True,
+        )
         flash_product_check_result(product["name"], result, error)
         return redirect(request.referrer or url_for("product_detail", product_id=product_id))
 
@@ -996,6 +1132,7 @@ def register_routes(app):
                     "edit_product.html",
                     product=product,
                     form=data,
+                    detected_store=data.get("detected_store", "Other website"),
                     page_title=f"Edit {product['name']}",
                 )
 
@@ -1010,6 +1147,9 @@ def register_routes(app):
                     notify_on_target = ?,
                     notify_on_big_drop = ?,
                     status = ?,
+                    allow_crawlbase_fallback = ?,
+                    prefer_crawlbase = ?,
+                    last_detected_store = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
@@ -1021,6 +1161,9 @@ def register_routes(app):
                     data["notify_on_target"],
                     data["notify_on_big_drop"],
                     data["status"],
+                    data["allow_crawlbase_fallback"],
+                    data["prefer_crawlbase"],
+                    data["detected_store"],
                     product_id,
                 ),
             )
@@ -1033,6 +1176,7 @@ def register_routes(app):
             "edit_product.html",
             product=product,
             form={},
+            detected_store=product["last_detected_store"] or detected_store_label(product["url"]),
             page_title=f"Edit {product['name']}",
         )
 

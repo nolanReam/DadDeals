@@ -1,6 +1,6 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2C.1 adds local timezone display, initial alert delivery, and clearer manual retry behavior.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2F adds optional Crawlbase fallback checks for exact product URLs.
 
 This phase does not include Scrape.do, proxy scraping, Selenium, Playwright, browser automation, Celery, Redis, Postgres, Docker, product recommendations, or attempts to bypass API limits.
 
@@ -17,12 +17,143 @@ DadDeals/
 |-- README.md
 |-- deployment/
 |-- scripts/
+|-- backups/
 |-- templates/
 |-- static/
 `-- instance/
 ```
 
-The SQLite database belongs in `instance/`. The real `.env` file and database files are ignored by Git.
+The SQLite database belongs in `instance/`. Backups belong in `backups/`. The real `.env` file, database files, logs, and backups are ignored by Git.
+
+## Dad Handoff Guide
+
+Open DadDeals from a phone or computer on the same home Wi-Fi:
+
+```text
+http://<pi-ip>:5000
+```
+
+If `raspberrypi.local` works on your network, this may also work:
+
+```text
+http://raspberrypi.local:5000
+```
+
+Use the dashboard password from `.env`.
+
+To add a product:
+
+1. Press `Add Product`.
+2. Paste the exact product page URL.
+3. Set a target price.
+4. Leave it active and save.
+5. DadDeals immediately tries one price check and shows the result.
+
+To add a stock:
+
+1. Press `Add Stock`.
+2. Enter the company name and ticker, such as `AAPL`.
+3. Set the target price or daily drop percent.
+4. Save it.
+
+What `Retry` means:
+
+- Retry checks that one product again from the website.
+- It is useful when a product check failed or was skipped.
+- It does not run every product or stock.
+
+Why Amazon checks are limited:
+
+- Amazon pages often block simple automatic checks.
+- DadDeals uses Canopy for Amazon when it is enabled.
+- Canopy has a monthly request budget, so DadDeals avoids checking Amazon too often.
+
+What Telegram alerts mean:
+
+- DadDeals creates alerts when a saved target or drop rule is met.
+- Telegram sends those alerts when configured.
+- If Telegram fails, the alert still appears on the dashboard.
+
+If a product check fails:
+
+- Press `Retry`.
+- Open the product source link and check manually.
+- For Amazon, make sure Canopy is enabled and monthly usage is not exhausted.
+
+What not to touch:
+
+- Do not edit `.env` unless changing passwords or API keys.
+- Do not delete `instance/daddeals.db`.
+- Do not delete the project folder.
+- Do not expose the site to the public internet.
+
+## Maintenance Guide For Me
+
+Restart the website:
+
+```bash
+sudo systemctl restart daddeals.service
+```
+
+Check website status:
+
+```bash
+sudo systemctl status daddeals.service
+```
+
+View website logs:
+
+```bash
+journalctl -u daddeals.service -n 80 --no-pager
+```
+
+View worker logs:
+
+```bash
+tail -n 80 logs/worker.log
+```
+
+Run the worker manually:
+
+```bash
+./scripts/run_worker.sh
+```
+
+Edit cron:
+
+```bash
+crontab -e
+```
+
+Back up the database:
+
+```bash
+./scripts/backup_db.sh
+```
+
+Restore note: stop the website first, then copy a backup over `instance/daddeals.db`, then start the website again.
+
+```bash
+sudo systemctl stop daddeals.service
+cp backups/daddeals-YYYYMMDD-HHMMSS.db instance/daddeals.db
+sudo systemctl start daddeals.service
+```
+
+Run a quick health check:
+
+```bash
+python worker.py --health
+```
+
+## Final Gift Test Checklist
+
+1. Reboot the Raspberry Pi and confirm the website loads.
+2. Run `python worker.py --test-telegram` and confirm Telegram receives a test.
+3. Run `python worker.py --run` and confirm a stock check works.
+4. Run `python worker.py --debug-canopy <ASIN>` and confirm Amazon Canopy works.
+5. Press `Retry` on a product from the website and confirm it finishes.
+6. Confirm `logs/worker.log` updates after cron or `./scripts/run_worker.sh`.
+7. Open Settings and confirm database, Telegram, Canopy, backups, timezone, and worker status look healthy.
 
 ## Windows Local Setup
 
@@ -70,6 +201,13 @@ ENABLE_CANOPY_AMAZON=false
 CANOPY_MONTHLY_LIMIT=100
 CANOPY_AUTH_HEADER=API-KEY
 AMAZON_CHECK_INTERVAL_HOURS=24
+ENABLE_CRAWLBASE=false
+CRAWLBASE_NORMAL_TOKEN=replace_me_later
+CRAWLBASE_JS_TOKEN=replace_me_later
+CRAWLBASE_DAILY_LIMIT=200
+CRAWLBASE_CHECK_INTERVAL_HOURS=24
+CRAWLBASE_DEFAULT_COUNTRY=US
+CRAWLBASE_USE_JS_FALLBACK=false
 ```
 
 Leave the Telegram values as placeholders until you are ready to test message delivery.
@@ -324,11 +462,20 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 2A. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, API usage, or delivery history.
+Back up the SQLite database:
+
+```bash
+chmod +x scripts/backup_db.sh
+./scripts/backup_db.sh
+```
+
+Backups are stored in `backups/`, and DadDeals keeps the newest 10 backup files. The backup script copies only the SQLite database; it does not copy `.env`.
+
+There is no reset command in Phase 2D. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, API usage, backups, or delivery history.
 
 ## Worker Commands
 
-Phase 2C.1 uses exact-URL product checks, optional Canopy API checks for Amazon URLs, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, product retry controls, local timezone display, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
+Phase 2F uses exact-URL product checks, optional Canopy API checks for Amazon URLs, optional Crawlbase fallback for selected retailer pages, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, product retry controls, local timezone display, database backups, health checks, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -360,6 +507,24 @@ Debug one Canopy Amazon API request without creating alerts:
 python worker.py --debug-canopy B08N5WRWNW
 ```
 
+Debug one Crawlbase retailer product-page fetch without creating alerts or product checks:
+
+```bash
+python worker.py --debug-crawlbase-url "https://www.bestbuy.com/site/example/1234567.p"
+```
+
+Try Crawlbase JavaScript mode when normal mode returns incomplete HTML:
+
+```bash
+python worker.py --debug-crawlbase-url "https://www.bestbuy.com/site/example/1234567.p" --js --page-wait 3000
+```
+
+Print a quick maintenance health summary:
+
+```bash
+python worker.py --health
+```
+
 Create checks and then send unsent alerts:
 
 ```bash
@@ -386,13 +551,14 @@ Open `Settings` from the top bar after logging in.
 
 The settings page shows:
 
-- app phase label: `DadDeals v2B - product check controls`
+- app phase label: `DadDeals v2F - Crawlbase fallback`
 - whether Telegram appears configured, without showing secrets
 - database path
 - last worker run time based on recent check rows
 - recent `logs/worker.log` status when cron has run
 - saved alert count
 - Canopy Amazon status, API key presence, auth header mode, monthly usage, and Amazon check interval
+- Crawlbase status, token presence, daily usage, interval, country, and JS fallback mode
 - display timezone from `APP_TIMEZONE`
 
 ## Timezone Display
@@ -653,6 +819,86 @@ How to interpret common debug results:
 - HTTP 429: likely Canopy rate limit or request budget issue.
 - JSON response but parsing failed: DadDeals saved a redacted response shape preview to `logs/canopy_debug_last.json` so the parser can be adjusted without exposing secrets.
 - Key missing: `.env` still has `CANOPY_API_KEY=replace_me_later` or the key is blank.
+
+## Crawlbase Fallback
+
+Phase 2F lets DadDeals use Crawlbase as a controlled fallback for exact product URLs. It still does not search the web, compare stores, use proxies, or run browser automation on the Pi.
+
+How product checks choose a method:
+
+- Amazon: Canopy is tried first when enabled and due. Crawlbase is used only if that product explicitly allows or prefers Crawlbase.
+- Best Buy: Crawlbase normal mode is preferred by default because Best Buy pages often block simple requests or hide price data.
+- Target, Walmart, Home Depot, Newegg, and other stores: DadDeals tries the normal lightweight requests + BeautifulSoup check first, then uses Crawlbase only when the product allows fallback.
+- Manual `Retry with Crawlbase` uses Crawlbase for that one product right away. It bypasses the Crawlbase interval but still respects `CRAWLBASE_DAILY_LIMIT`.
+- Scheduled worker checks respect `CRAWLBASE_CHECK_INTERVAL_HOURS` so cron does not spend requests too often.
+
+Crawlbase is not guaranteed to work for every retailer. Some pages still hide prices, block automated traffic, or return HTML that needs a future parser adjustment. DadDeals saves a friendly failed check instead of crashing.
+
+DadDeals uses the documented Crawlbase Crawling API endpoint:
+
+```text
+https://api.crawlbase.com/?token=YOUR_TOKEN&url=ENCODED_URL
+```
+
+Crawlbase has two token types:
+
+- Normal token: faster path for static HTML.
+- JavaScript token: rendered browser path for pages that need JavaScript. Use this with `--js`, `--page-wait`, or `--ajax-wait`.
+
+Add these values to your real `.env`:
+
+```text
+ENABLE_CRAWLBASE=true
+CRAWLBASE_NORMAL_TOKEN=your_normal_token_here
+CRAWLBASE_JS_TOKEN=your_js_token_here
+CRAWLBASE_DAILY_LIMIT=200
+CRAWLBASE_CHECK_INTERVAL_HOURS=24
+CRAWLBASE_DEFAULT_COUNTRY=US
+CRAWLBASE_USE_JS_FALLBACK=false
+```
+
+Keep `CRAWLBASE_USE_JS_FALLBACK=false` at first. Turn it on only if normal Crawlbase mode cannot see a price and you are comfortable using the JavaScript token for fallback checks. Best Buy still uses normal mode by default.
+
+Product form options:
+
+- `Use Crawlbase if normal check fails`: normal request first, Crawlbase second.
+- `Prefer Crawlbase for this product`: Crawlbase first, then normal request if Crawlbase fails.
+
+The product dashboard and detail page show the last detected store and last check method, such as `Normal`, `Crawlbase Normal`, `Crawlbase Js`, or `Amazon Canopy`.
+
+Run a normal-token diagnostic:
+
+```bash
+python worker.py --debug-crawlbase-url "https://www.bestbuy.com/site/example/1234567.p"
+```
+
+Try JavaScript mode if normal mode returns incomplete HTML:
+
+```bash
+python worker.py --debug-crawlbase-url "https://www.bestbuy.com/site/example/1234567.p" --js --country US --page-wait 3000
+```
+
+You can also try waiting for AJAX/network idle:
+
+```bash
+python worker.py --debug-crawlbase-url "https://www.bestbuy.com/site/example/1234567.p" --js --ajax-wait
+```
+
+The debug command:
+
+- prints Crawlbase enabled/token status without printing tokens
+- detects Best Buy, Newegg, Walmart, Target, and Home Depot URLs
+- extracts Best Buy SKUs from `/SKU.p` and `skuId=SKU`
+- makes one Crawlbase request only when enabled and a required token is present
+- saves returned HTML/text to `logs/crawlbase_debug_last.html`
+- saves redacted metadata to `logs/crawlbase_debug_last.json`
+- attempts Best Buy title/price/availability parsing
+- creates no alerts and sends no Telegram messages
+- does not update tracked product `price_checks`
+
+Crawlbase usage is tracked in the existing `api_usage` table with provider `crawlbase` and a daily key such as `2026-06-22`. DadDeals will not make a Crawlbase debug or fallback request after `CRAWLBASE_DAILY_LIMIT` is reached for that day.
+
+Preserve Crawlbase credits by testing manually and daily, not constantly from cron.
 
 ## Real Stock Checks
 
