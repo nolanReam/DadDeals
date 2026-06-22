@@ -24,6 +24,17 @@
             Daily rise percent
             <input type="number" step="0.1" min="0" name="daily_rise_percent" value="{{ form.get('daily_rise_percent', stock.daily_rise_percent) if form.get('daily_rise_percent', stock.daily_rise_percent) is not none }}">
         </label>
+        <label>
+            Check this stock every
+            <select name="stock_check_interval_minutes">
+                {% set stock_interval = form.get('stock_check_interval_minutes', stock.stock_check_interval_minutes) %}
+                <option value="1" {% if stock_interval == 1 %}selected{% endif %}>1 minute</option>
+                <option value="5" {% if stock_interval == 5 %}selected{% endif %}>5 minutes</option>
+                <option value="15" {% if stock_interval == 15 %}selected{% endif %}>15 minutes</option>
+                <option value="30" {% if stock_interval == 30 %}selected{% endif %}>30 minutes</option>
+                <option value="60" {% if stock_interval == 60 %}selected{% endif %}>60 minutes</option>
+            </select>
+        </label>
         <label class="check-row">
             <input type="checkbox" name="notify_on_target" {% if form.get('notify_on_target', stock.notify_on_target) %}checked{% endif %}>
             Tell me when it reaches the target price

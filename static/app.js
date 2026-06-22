@@ -35,3 +35,38 @@ document.addEventListener("input", function (event) {
         allow.checked = true;
     }
 });
+
+function refreshSavedStockQuotes() {
+    var stockCards = document.querySelectorAll(".stock-card[data-stock-id]");
+    if (!stockCards.length || !window.fetch) return;
+
+    fetch("/stocks/latest.json", { credentials: "same-origin" })
+        .then(function (response) {
+            if (!response.ok) throw new Error("Could not refresh stock cards.");
+            return response.json();
+        })
+        .then(function (data) {
+            (data.stocks || []).forEach(function (stock) {
+                var card = document.querySelector('.stock-card[data-stock-id="' + stock.id + '"]');
+                if (!card) return;
+
+                var price = card.querySelector("[data-stock-price]");
+                var checked = card.querySelector("[data-stock-checked]");
+                var status = card.querySelector("[data-stock-status]");
+                var change = card.querySelector("[data-stock-change]");
+
+                if (price) price.textContent = stock.latest_price;
+                if (checked) checked.textContent = stock.last_checked_at;
+                if (change) change.textContent = stock.percent_change;
+                if (status) {
+                    status.textContent = stock.status;
+                    status.className = "status " + stock.status_class;
+                }
+            });
+        })
+        .catch(function () {
+            // Quietly keep showing the latest saved values already on the page.
+        });
+}
+
+window.setInterval(refreshSavedStockQuotes, 60000);

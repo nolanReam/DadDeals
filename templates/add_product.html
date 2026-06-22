@@ -27,6 +27,28 @@
             Big drop percent
             <input type="number" step="0.1" min="0" name="big_drop_percent" value="{{ form.get('big_drop_percent', '') if form.get('big_drop_percent') is not none }}" placeholder="Example: 20">
         </label>
+        <label>
+            Check this product every
+            <select name="product_check_interval_hours">
+                {% set check_interval = form.get('product_check_interval_hours', 24) %}
+                <option value="6" {% if check_interval == 6 %}selected{% endif %}>6 hours</option>
+                <option value="12" {% if check_interval == 12 %}selected{% endif %}>12 hours</option>
+                <option value="24" {% if check_interval == 24 %}selected{% endif %}>24 hours</option>
+                <option value="48" {% if check_interval == 48 %}selected{% endif %}>2 days</option>
+                <option value="72" {% if check_interval == 72 %}selected{% endif %}>3 days</option>
+            </select>
+        </label>
+        <label>
+            Notify me again at most every
+            <select name="product_notify_cooldown_hours">
+                {% set cooldown = form.get('product_notify_cooldown_hours', 72) %}
+                <option value="0" {% if cooldown == 0 %}selected{% endif %}>Every alert</option>
+                <option value="12" {% if cooldown == 12 %}selected{% endif %}>12 hours</option>
+                <option value="24" {% if cooldown == 24 %}selected{% endif %}>24 hours</option>
+                <option value="72" {% if cooldown == 72 %}selected{% endif %}>3 days</option>
+                <option value="168" {% if cooldown == 168 %}selected{% endif %}>7 days</option>
+            </select>
+        </label>
         <label class="check-row">
             <input type="checkbox" name="notify_on_target" {% if form.get('notify_on_target', 1) %}checked{% endif %}>
             Tell me when it reaches the target price

@@ -1,6 +1,6 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2F adds optional Crawlbase fallback checks for exact product URLs.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2G adds polished Telegram alerts, per-item check controls, and a clearer stock watchlist dashboard.
 
 This phase does not include Scrape.do, proxy scraping, Selenium, Playwright, browser automation, Celery, Redis, Postgres, Docker, product recommendations, or attempts to bypass API limits.
 
@@ -196,6 +196,10 @@ PORT=5000
 APP_TIMEZONE=America/Los_Angeles
 TELEGRAM_BOT_TOKEN=replace_me_later
 TELEGRAM_CHAT_ID=replace_me_later
+TELEGRAM_QUIET_HOURS_ENABLED=false
+TELEGRAM_QUIET_START=22:00
+TELEGRAM_QUIET_END=07:00
+TELEGRAM_QUIET_TIMEZONE=America/Los_Angeles
 CANOPY_API_KEY=replace_me_later
 ENABLE_CANOPY_AMAZON=false
 CANOPY_MONTHLY_LIMIT=100
@@ -475,7 +479,7 @@ There is no reset command in Phase 2D. That is intentional, so a beginner comman
 
 ## Worker Commands
 
-Phase 2F uses exact-URL product checks, optional Canopy API checks for Amazon URLs, optional Crawlbase fallback for selected retailer pages, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, product retry controls, local timezone display, database backups, health checks, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
+Phase 2G uses exact-URL product checks, optional Canopy API checks for Amazon URLs, optional Crawlbase fallback for selected retailer pages, real yfinance stock data, polished Telegram delivery, optional quiet hours, per-item check intervals, product notification cooldowns, optional cron scheduling, simple reliability controls, safer alert management, local timezone display, database backups, health checks, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -551,7 +555,7 @@ Open `Settings` from the top bar after logging in.
 
 The settings page shows:
 
-- app phase label: `DadDeals v2F - Crawlbase fallback`
+- app phase label: `DadDeals v2G - polished alerts and watchlists`
 - whether Telegram appears configured, without showing secrets
 - database path
 - last worker run time based on recent check rows
@@ -594,6 +598,51 @@ To delete recent alerts while testing:
 2. Press `Delete Alert` on one alert to remove only that alert.
 3. Or check several alerts, check the confirmation box under the alert list, and press `Delete Selected Alerts`.
 4. If no alerts are selected, DadDeals shows a friendly message and deletes nothing.
+
+## Phase 2G Watchlist Controls
+
+Telegram alerts are formatted for quick reading on a phone. New product target alerts look like:
+
+```text
+DadDeals Alert
+
+Product target hit:
+Coffee Maker
+
+Coffee Maker is $49.99, which is $10.01 below your $60.00 target.
+
+Source:
+https://example.com/product
+```
+
+Telegram quiet hours are optional. Add these values to `.env` to pause non-urgent alert delivery overnight while still saving alert rows:
+
+```text
+TELEGRAM_QUIET_HOURS_ENABLED=false
+TELEGRAM_QUIET_START=22:00
+TELEGRAM_QUIET_END=07:00
+TELEGRAM_QUIET_TIMEZONE=America/Los_Angeles
+```
+
+Product check frequency controls how often the scheduled worker is allowed to check that product. Manual website retries and the first check after adding a product bypass this interval.
+
+Product notification cooldown controls how often DadDeals creates another product alert if the product stays below target. Check history still saves even while notifications are cooling down.
+
+Recommended product settings:
+
+- Most products: check every 24 hours.
+- Hard-to-check retailer pages: check every 48 or 72 hours.
+- Product notification cooldown: 3 days is a good dad-friendly default.
+
+Stock cards show the latest saved quote from SQLite. The dashboard refreshes those saved values about once per minute, but it does not call yfinance from the browser. If cron or the worker has not saved a new stock check, the dashboard values stay the same.
+
+DadDeals uses yfinance and is for personal watchlist alerts, not guaranteed real-time trading data. It is not trading advice and should not be treated like a professional trading platform.
+
+Recommended stock settings:
+
+- Normal watchlist: check every 5 minutes during market hours.
+- Quiet watchlist: check every 15, 30, or 60 minutes.
+- 1-minute checks: use only for a small number of tickers.
 
 ## Exact-URL Product Checks
 
@@ -919,7 +968,7 @@ Open the stock detail page to see:
 - check status
 - friendly failure message if the ticker could not be fetched
 
-Products use exact-URL checks in Phase 1G. Stock checks use yfinance.
+Products use exact-URL checks with optional Canopy/Crawlbase support. Stock checks use yfinance and the latest saved quote appears on the dashboard, stock detail page, and lightweight stock graph.
 
 ## Telegram Setup
 
@@ -1014,7 +1063,7 @@ tail -n 80 logs/worker.log
 If the script says it cannot find Python, open `scripts/run_worker.sh` and edit `PROJECT_DIR` near the top. For example:
 
 ```bash
-PROJECT_DIR="/home/pi/DadDeals"
+PROJECT_DIR="/home/nolan/DadDeals"
 ```
 
 Edit your cron jobs:
@@ -1023,19 +1072,19 @@ Edit your cron jobs:
 crontab -e
 ```
 
-Option A, local 9 AM to 4 PM, Monday-Friday:
+Option A, simple daily product/stock check:
 
 ```cron
-0 9-16 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+0 9 * * * /home/nolan/DadDeals/scripts/run_worker.sh
 ```
 
-Option B, U.S. stock market hours from California time, roughly 6 AM to 1 PM, Monday-Friday:
+Option B, more active stock watchlist during California market hours:
 
 ```cron
-0 6-13 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+*/5 6-13 * * 1-5 /home/nolan/DadDeals/scripts/run_worker.sh
 ```
 
-If your Pi username or project path is different, replace `/home/pi/DadDeals` with the real path. You can check the current folder with:
+The worker still respects each product and stock interval, so running cron every 5 minutes does not mean every saved item is checked every 5 minutes. If your Pi username or project path is different, replace `/home/nolan/DadDeals` with the real path. You can check the current folder with:
 
 ```bash
 pwd
@@ -1044,7 +1093,7 @@ pwd
 Disable the cron job by editing crontab again and putting `#` at the start of the DadDeals line:
 
 ```cron
-# 0 6-13 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+# */5 6-13 * * 1-5 /home/nolan/DadDeals/scripts/run_worker.sh
 ```
 
 Confirm cron is installed:

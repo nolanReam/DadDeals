@@ -95,6 +95,14 @@
             <dd>{{ "%.1f%%"|format(product.big_drop_percent) if product.big_drop_percent is not none else "Not set" }}</dd>
         </div>
         <div>
+            <dt>Check frequency</dt>
+            <dd>Every {{ product.product_check_interval_hours }} hour(s)</dd>
+        </div>
+        <div>
+            <dt>Notification cooldown</dt>
+            <dd>{% if product.product_notify_cooldown_hours == 0 %}Every alert{% else %}Every {{ product.product_notify_cooldown_hours }} hour(s){% endif %}</dd>
+        </div>
+        <div>
             <dt>Status</dt>
             <dd><span class="status {{ product.status }}">{{ product.status|title }}</span></dd>
         </div>

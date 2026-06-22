@@ -214,6 +214,17 @@ button,
     padding: 14px;
 }
 
+.stock-chart {
+    width: 100%;
+    max-width: 520px;
+    height: auto;
+    color: #2563eb;
+    background: #f8fafc;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px;
+}
+
 .card-top {
     display: flex;
     align-items: start;
@@ -266,6 +277,11 @@ button,
 .status.skipped {
     background: #e0f2fe;
     color: #075985;
+}
+
+.status.cooling-down {
+    background: #ede9fe;
+    color: #5b21b6;
 }
 
 .status.never {

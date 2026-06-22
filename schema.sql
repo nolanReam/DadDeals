@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS tracked_products (
     status TEXT NOT NULL DEFAULT 'active',
     allow_crawlbase_fallback INTEGER NOT NULL DEFAULT 0,
     prefer_crawlbase INTEGER NOT NULL DEFAULT 0,
+    product_check_interval_hours INTEGER NOT NULL DEFAULT 24,
+    product_notify_cooldown_hours INTEGER NOT NULL DEFAULT 72,
     last_check_method TEXT,
     last_detected_store TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -24,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tracked_stocks (
     daily_rise_percent REAL,
     notify_on_target INTEGER NOT NULL DEFAULT 1,
     notify_on_big_drop INTEGER NOT NULL DEFAULT 0,
+    stock_check_interval_minutes INTEGER NOT NULL DEFAULT 5,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

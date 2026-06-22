@@ -14,6 +14,7 @@ from flask import (
     abort,
     flash,
     g,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -110,6 +111,8 @@ def init_db():
     migrate_alert_delivery_columns(db)
     migrate_price_check_columns(db)
     migrate_product_crawlbase_columns(db)
+    migrate_product_schedule_columns(db)
+    migrate_stock_schedule_columns(db)
     db.commit()
 
 
@@ -147,6 +150,8 @@ def schema_needs_upgrade():
         alert_delivery_columns_missing(db)
         or price_check_columns_missing(db)
         or product_crawlbase_columns_missing(db)
+        or product_schedule_columns_missing(db)
+        or stock_schedule_columns_missing(db)
     )
 
 
@@ -242,6 +247,52 @@ def migrate_product_crawlbase_columns(db):
         db.execute("ALTER TABLE tracked_products ADD COLUMN last_detected_store TEXT")
 
 
+def product_schedule_columns_missing(db):
+    """Return True when product rows need Phase 2G schedule settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    required_columns = {
+        "product_check_interval_hours",
+        "product_notify_cooldown_hours",
+    }
+    return not required_columns.issubset(existing_columns)
+
+
+def migrate_product_schedule_columns(db):
+    """Add per-product check and notification cooldown settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    if "product_check_interval_hours" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN product_check_interval_hours INTEGER NOT NULL DEFAULT 24"
+        )
+    if "product_notify_cooldown_hours" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN product_notify_cooldown_hours INTEGER NOT NULL DEFAULT 72"
+        )
+
+
+def stock_schedule_columns_missing(db):
+    """Return True when stock rows need Phase 2G schedule settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_stocks)").fetchall()
+    }
+    return "stock_check_interval_minutes" not in existing_columns
+
+
+def migrate_stock_schedule_columns(db):
+    """Add per-stock check interval settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_stocks)").fetchall()
+    }
+    if "stock_check_interval_minutes" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_stocks ADD COLUMN stock_check_interval_minutes INTEGER NOT NULL DEFAULT 5"
+        )
+
+
 def linkify_urls(value):
     """Render plain alert text while turning http/https URLs into safe links."""
     text = str(value or "")
@@ -332,6 +383,21 @@ def parse_non_negative_number(value, field_label, errors):
     return number
 
 
+def parse_choice_int(value, allowed_values, default, field_label, errors):
+    """Parse a dropdown integer and fall back safely when needed."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        errors.append(f"{field_label} has an invalid choice.")
+        return default
+
+    if number not in allowed_values:
+        errors.append(f"{field_label} has an invalid choice.")
+        return default
+
+    return number
+
+
 def checkbox_value(name):
     """HTML checkboxes only submit a value when checked."""
     return 1 if request.form.get(name) == "on" else 0
@@ -401,6 +467,20 @@ def product_form_data():
         "status": clean_status(),
         "allow_crawlbase_fallback": checkbox_value("allow_crawlbase_fallback"),
         "prefer_crawlbase": checkbox_value("prefer_crawlbase"),
+        "product_check_interval_hours": parse_choice_int(
+            request.form.get("product_check_interval_hours", "24"),
+            {6, 12, 24, 48, 72},
+            24,
+            "Product check frequency",
+            errors,
+        ),
+        "product_notify_cooldown_hours": parse_choice_int(
+            request.form.get("product_notify_cooldown_hours", "72"),
+            {0, 12, 24, 72, 168},
+            72,
+            "Product notification cooldown",
+            errors,
+        ),
     }
     data["detected_store"] = detected_store_label(data["url"])
     return data, errors
@@ -425,6 +505,13 @@ def stock_form_data():
         ),
         "notify_on_target": checkbox_value("notify_on_target"),
         "notify_on_big_drop": checkbox_value("notify_on_big_drop"),
+        "stock_check_interval_minutes": parse_choice_int(
+            request.form.get("stock_check_interval_minutes", "5"),
+            {1, 5, 15, 30, 60},
+            5,
+            "Stock check frequency",
+            errors,
+        ),
         "status": clean_status(),
     }
     return data, errors
@@ -442,6 +529,16 @@ def telegram_config_present():
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     placeholder_values = {"", "replace_me", "replace_me_later"}
     return token not in placeholder_values and chat_id not in placeholder_values
+
+
+def telegram_quiet_status():
+    """Return quiet-hours display settings without secrets."""
+    return {
+        "enabled": env_flag("TELEGRAM_QUIET_HOURS_ENABLED", False),
+        "start": os.environ.get("TELEGRAM_QUIET_START", "22:00"),
+        "end": os.environ.get("TELEGRAM_QUIET_END", "07:00"),
+        "timezone": os.environ.get("TELEGRAM_QUIET_TIMEZONE", "America/Los_Angeles"),
+    }
 
 
 def env_flag(name, default=False):
@@ -646,7 +743,29 @@ def price_change_text(current_price, baseline_price):
     return f"${abs(difference):.2f} {direction}{percent_text}"
 
 
-def product_check_summary(db, product_id):
+def product_cooling_down(db, product, title):
+    """Return True when a product alert is currently in cooldown."""
+    cooldown_hours = int(product["product_notify_cooldown_hours"] or 0)
+    if cooldown_hours <= 0:
+        return False
+    row = db.execute(
+        """
+        SELECT (julianday('now') - julianday(created_at)) * 24.0 AS age_hours
+        FROM alerts
+        WHERE item_type = 'product'
+          AND item_id = ?
+          AND title = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (product["id"], title),
+    ).fetchone()
+    if row is None or row["age_hours"] is None:
+        return False
+    return float(row["age_hours"]) < cooldown_hours
+
+
+def product_check_summary(db, product_id, product=None):
     """Summarize product check history for one product."""
     latest_check = db.execute(
         """
@@ -674,6 +793,18 @@ def product_check_summary(db, product_id):
     latest_success = successful_checks[-1] if successful_checks else None
     previous_success = successful_checks[-2] if len(successful_checks) >= 2 else None
     latest_price = latest_success["current_price"] if latest_success else None
+    product_target_price = product["target_price"] if product is not None else None
+    below_target = (
+        product is not None
+        and latest_price is not None
+        and product_target_price is not None
+        and latest_price <= product_target_price
+    )
+    cooling_down = False
+    if below_target and product is not None:
+        cooling_down = product_cooling_down(
+            db, product, f"Product target hit: {product['name']}"
+        )
 
     if latest_check is None:
         status = "never"
@@ -691,6 +822,8 @@ def product_check_summary(db, product_id):
         "latest_success": latest_success,
         "previous_success": previous_success,
         "latest_price": latest_price,
+        "below_target": below_target,
+        "cooling_down": cooling_down,
         "last_checked_at": latest_check["checked_at"] if latest_check else None,
         "last_status": status,
         "last_status_label": status_label_text,
@@ -711,8 +844,140 @@ def product_check_summary(db, product_id):
 def attach_product_summaries(db, products):
     """Add check summary fields to dashboard product dictionaries."""
     for product in products:
-        product["check_summary"] = product_check_summary(db, product["id"])
+        product["check_summary"] = product_check_summary(db, product["id"], product)
+        summary = product["check_summary"]
+        if product["status"] == "paused":
+            product["display_status"] = "Paused"
+            product["display_status_class"] = "paused"
+        elif summary["cooling_down"]:
+            product["display_status"] = "Cooling down"
+            product["display_status_class"] = "cooling-down"
+        elif summary["below_target"]:
+            product["display_status"] = "Target hit"
+            product["display_status_class"] = "target-hit"
+        elif summary["last_status"] == "failed":
+            product["display_status"] = "Failed"
+            product["display_status_class"] = "failed"
+        elif summary["last_status"] == "skipped":
+            product["display_status"] = "Needs retry"
+            product["display_status_class"] = "skipped"
+        else:
+            product["display_status"] = "Working"
+            product["display_status_class"] = "watching"
     return products
+
+
+def stock_check_summary(db, stock_id):
+    """Summarize saved stock checks for one stock."""
+    latest_check = db.execute(
+        """
+        SELECT *
+        FROM stock_checks
+        WHERE stock_id = ?
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (stock_id,),
+    ).fetchone()
+    latest_success = db.execute(
+        """
+        SELECT *
+        FROM stock_checks
+        WHERE stock_id = ?
+          AND status = 'ok'
+          AND current_price IS NOT NULL
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (stock_id,),
+    ).fetchone()
+
+    if latest_check is None:
+        status = "never"
+        status_label_text = "Never checked"
+    elif latest_check["status"] == "ok":
+        status = "success"
+        status_label_text = "Watching"
+    else:
+        status = latest_check["status"]
+        status_label_text = latest_check["status"].title()
+
+    return {
+        "latest_check": latest_check,
+        "latest_success": latest_success,
+        "latest_price": latest_success["current_price"] if latest_success else None,
+        "last_checked_at": latest_check["checked_at"] if latest_check else None,
+        "last_status": status,
+        "last_status_label": status_label_text,
+        "last_message": latest_check["message"] if latest_check else None,
+        "percent_change": latest_success["percent_change"] if latest_success else None,
+    }
+
+
+def attach_stock_summaries(db, stocks):
+    """Add latest saved quote details to dashboard stock dictionaries."""
+    for stock in stocks:
+        summary = stock_check_summary(db, stock["id"])
+        stock["check_summary"] = summary
+        if stock["status"] == "paused":
+            stock["display_status"] = "Paused"
+            stock["display_status_class"] = "paused"
+        elif summary["last_status"] == "never":
+            stock["display_status"] = "Never checked"
+            stock["display_status_class"] = "skipped"
+        elif summary["last_status"] == "failed":
+            stock["display_status"] = "Failed"
+            stock["display_status_class"] = "failed"
+        elif stock["id"] in target_hit_ids(db, "stock"):
+            stock["display_status"] = "Target hit"
+            stock["display_status_class"] = "target-hit"
+        else:
+            stock["display_status"] = "Watching"
+            stock["display_status_class"] = "watching"
+    return stocks
+
+
+def stock_graph_points(db, stock_id):
+    """Build lightweight SVG points from recent successful stock checks."""
+    rows = db.execute(
+        """
+        SELECT checked_at, current_price
+        FROM stock_checks
+        WHERE stock_id = ?
+          AND status = 'ok'
+          AND current_price IS NOT NULL
+        ORDER BY checked_at ASC, id ASC
+        LIMIT 30
+        """,
+        (stock_id,),
+    ).fetchall()
+    if len(rows) < 2:
+        return []
+
+    prices = [row["current_price"] for row in rows]
+    min_price = min(prices)
+    max_price = max(prices)
+    price_range = max(max_price - min_price, 0.01)
+    width = 320
+    height = 140
+    padding = 12
+    usable_width = width - (padding * 2)
+    usable_height = height - (padding * 2)
+    points = []
+    for index, row in enumerate(rows):
+        x = padding + (usable_width * index / (len(rows) - 1))
+        y = padding + usable_height - (
+            usable_height * (row["current_price"] - min_price) / price_range
+        )
+        points.append(
+            {
+                "x": round(x, 1),
+                "y": round(y, 1),
+                "price": row["current_price"],
+                "checked_at": local_time(row["checked_at"]),
+            }
+        )
+    return points
 
 
 def run_single_product_check(db, product, force=False, force_crawlbase=False):
@@ -737,6 +1002,37 @@ def run_single_product_check(db, product, force=False, force_crawlbase=False):
         return None, "DadDeals could not finish that product check."
 
 
+def run_single_stock_check(db, stock, force=False):
+    """Run one stock check from the web app without checking every stock."""
+    from worker import StockFetchError, check_stock
+
+    try:
+        result = check_stock(db, stock, dry_run=False, force=force)
+        db.commit()
+        return result, None
+    except StockFetchError as error:
+        db.rollback()
+        return None, str(error)
+    except Exception:
+        db.rollback()
+        return None, "DadDeals could not finish that stock check."
+
+
+def flash_stock_check_result(ticker, result, error=None):
+    """Show a friendly result after a web-triggered stock check."""
+    if error:
+        flash(f"{ticker} check failed: {error}", "error")
+        return
+
+    message = result["messages"][0] if result["messages"] else "Check completed."
+    if result["status"] == "ok":
+        flash(f"{ticker} stock check succeeded.", "success")
+    elif result["status"] == "skipped":
+        flash(f"{ticker} stock check was skipped: {message}", "error")
+    else:
+        flash(f"{ticker} stock check failed: {message}", "error")
+
+
 def flash_product_check_result(product_name, result, error=None):
     """Show a friendly result after a web-triggered product check."""
     if error:
@@ -757,7 +1053,13 @@ def send_new_product_alerts(db, product_id, after_alert_id):
     if not telegram_config_present():
         return {"sent": 0, "failed": 0, "total": 0, "configured": False}
 
-    from worker import alert_text, mark_alert_failed, mark_alert_sent, send_telegram_message
+    from worker import (
+        alert_text,
+        mark_alert_failed,
+        mark_alert_sent,
+        send_telegram_message,
+        telegram_quiet_hours_active,
+    )
 
     alerts = db.execute(
         """
@@ -772,6 +1074,15 @@ def send_new_product_alerts(db, product_id, after_alert_id):
         """,
         (after_alert_id, product_id),
     ).fetchall()
+
+    if alerts and telegram_quiet_hours_active():
+        return {
+            "sent": 0,
+            "failed": 0,
+            "total": len(alerts),
+            "configured": True,
+            "quiet": True,
+        }
 
     sent_count = 0
     failed_count = 0
@@ -790,12 +1101,17 @@ def send_new_product_alerts(db, product_id, after_alert_id):
         "failed": failed_count,
         "total": len(alerts),
         "configured": True,
+        "quiet": False,
     }
 
 
 def flash_initial_delivery_result(delivery_result):
     """Show the outcome of initial product alert Telegram delivery."""
     if not delivery_result["configured"] or delivery_result["total"] == 0:
+        return
+
+    if delivery_result.get("quiet"):
+        flash("DadDeals created an alert. Telegram quiet hours are active, so it will send later.", "success")
         return
 
     if delivery_result["failed"]:
@@ -851,11 +1167,11 @@ def register_routes(app):
             latest_check_statuses(db, "price_checks", "product_id"),
             target_hit_ids(db, "product"),
         ))
-        stocks = decorate_items(
+        stocks = attach_stock_summaries(db, decorate_items(
             stock_rows,
             latest_check_statuses(db, "stock_checks", "stock_id"),
             target_hit_ids(db, "stock"),
-        )
+        ))
         alerts = db.execute(
             "SELECT * FROM alerts ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
@@ -867,6 +1183,43 @@ def register_routes(app):
             page_title="Dashboard",
         )
 
+    @app.route("/stocks/latest.json")
+    @login_required
+    def latest_stock_quotes_json():
+        db = get_db()
+        stock_rows = db.execute(
+            "SELECT * FROM tracked_stocks ORDER BY created_at DESC"
+        ).fetchall()
+        stocks = attach_stock_summaries(db, [dict(row) for row in stock_rows])
+        return jsonify(
+            {
+                "stocks": [
+                    {
+                        "id": stock["id"],
+                        "ticker": stock["ticker"],
+                        "latest_price": (
+                            f"${stock['check_summary']['latest_price']:.2f}"
+                            if stock["check_summary"]["latest_price"] is not None
+                            else "No price checked yet"
+                        ),
+                        "last_checked_at": (
+                            local_time(stock["check_summary"]["last_checked_at"])
+                            if stock["check_summary"]["last_checked_at"]
+                            else "Never checked"
+                        ),
+                        "status": stock["display_status"],
+                        "status_class": stock["display_status_class"],
+                        "percent_change": (
+                            f"{stock['check_summary']['percent_change']:.1f}%"
+                            if stock["check_summary"]["percent_change"] is not None
+                            else "Not available"
+                        ),
+                    }
+                    for stock in stocks
+                ]
+            }
+        )
+
     @app.route("/settings")
     @login_required
     def settings():
@@ -875,8 +1228,9 @@ def register_routes(app):
         return render_template(
             "settings.html",
             page_title="Settings",
-            phase_label="DadDeals v2F - Crawlbase fallback",
+            phase_label="DadDeals v2G - polished alerts and watchlists",
             telegram_ready=telegram_config_present(),
+            telegram_quiet=telegram_quiet_status(),
             database_path=database_path(),
             last_worker_run=latest_worker_run_time(db),
             worker_log=worker_log_summary(),
@@ -885,6 +1239,9 @@ def register_routes(app):
             crawlbase=crawlbase_status(db),
             app_timezone=os.environ.get("APP_TIMEZONE", "America/Los_Angeles"),
             backup=backup_summary(),
+            product_default_check_hours=24,
+            product_default_cooldown_hours=72,
+            stock_default_check_minutes=5,
         )
 
     @app.route("/alerts/clear-old", methods=["POST"])
@@ -995,9 +1352,11 @@ def register_routes(app):
                 INSERT INTO tracked_products (
                     name, url, target_price, big_drop_percent,
                     notify_on_target, notify_on_big_drop, status,
-                    allow_crawlbase_fallback, prefer_crawlbase, last_detected_store
+                    allow_crawlbase_fallback, prefer_crawlbase,
+                    product_check_interval_hours, product_notify_cooldown_hours,
+                    last_detected_store
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["name"],
@@ -1009,6 +1368,8 @@ def register_routes(app):
                     data["status"],
                     data["allow_crawlbase_fallback"],
                     data["prefer_crawlbase"],
+                    data["product_check_interval_hours"],
+                    data["product_notify_cooldown_hours"],
                     data["detected_store"],
                 ),
             )
@@ -1050,7 +1411,7 @@ def register_routes(app):
         return render_template(
             "product_detail.html",
             product=product,
-            summary=product_check_summary(db, product_id),
+            summary=product_check_summary(db, product_id, product),
             price_checks=price_checks,
             page_title=product["name"],
         )
@@ -1149,6 +1510,8 @@ def register_routes(app):
                     status = ?,
                     allow_crawlbase_fallback = ?,
                     prefer_crawlbase = ?,
+                    product_check_interval_hours = ?,
+                    product_notify_cooldown_hours = ?,
                     last_detected_store = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -1163,6 +1526,8 @@ def register_routes(app):
                     data["status"],
                     data["allow_crawlbase_fallback"],
                     data["prefer_crawlbase"],
+                    data["product_check_interval_hours"],
+                    data["product_notify_cooldown_hours"],
                     data["detected_store"],
                     product_id,
                 ),
@@ -1221,9 +1586,9 @@ def register_routes(app):
                 INSERT INTO tracked_stocks (
                     company_name, ticker, target_price, daily_drop_percent,
                     daily_rise_percent, notify_on_target,
-                    notify_on_big_drop, status
+                    notify_on_big_drop, stock_check_interval_minutes, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["company_name"],
@@ -1233,6 +1598,7 @@ def register_routes(app):
                     data["daily_rise_percent"],
                     data["notify_on_target"],
                     data["notify_on_big_drop"],
+                    data["stock_check_interval_minutes"],
                     data["status"],
                 ),
             )
@@ -1260,9 +1626,20 @@ def register_routes(app):
         return render_template(
             "stock_detail.html",
             stock=stock,
+            summary=stock_check_summary(db, stock_id),
             stock_checks=stock_checks,
+            graph_points=stock_graph_points(db, stock_id),
             page_title=stock["ticker"],
         )
+
+    @app.route("/stocks/<int:stock_id>/check-now", methods=["POST"])
+    @login_required
+    def check_stock_now(stock_id):
+        db = get_db()
+        stock = get_stock_or_404(stock_id)
+        result, error = run_single_stock_check(db, stock, force=True)
+        flash_stock_check_result(stock["ticker"], result, error)
+        return redirect(request.referrer or url_for("stock_detail", stock_id=stock_id))
 
     @app.route("/stocks/<int:stock_id>/edit", methods=["GET", "POST"])
     @login_required
@@ -1290,6 +1667,7 @@ def register_routes(app):
                     daily_rise_percent = ?,
                     notify_on_target = ?,
                     notify_on_big_drop = ?,
+                    stock_check_interval_minutes = ?,
                     status = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
@@ -1302,6 +1680,7 @@ def register_routes(app):
                     data["daily_rise_percent"],
                     data["notify_on_target"],
                     data["notify_on_big_drop"],
+                    data["stock_check_interval_minutes"],
                     data["status"],
                     stock_id,
                 ),

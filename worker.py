@@ -16,9 +16,10 @@ import sqlite3
 import sys
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -62,6 +63,8 @@ def init_db(db):
     migrate_alert_delivery_columns(db)
     migrate_price_check_columns(db)
     migrate_product_crawlbase_columns(db)
+    migrate_product_schedule_columns(db)
+    migrate_stock_schedule_columns(db)
     db.commit()
 
 
@@ -124,6 +127,32 @@ def migrate_product_crawlbase_columns(db):
         db.execute("ALTER TABLE tracked_products ADD COLUMN last_check_method TEXT")
     if "last_detected_store" not in existing_columns:
         db.execute("ALTER TABLE tracked_products ADD COLUMN last_detected_store TEXT")
+
+
+def migrate_product_schedule_columns(db):
+    """Add Phase 2G per-product schedule and notification settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_products)").fetchall()
+    }
+    if "product_check_interval_hours" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN product_check_interval_hours INTEGER NOT NULL DEFAULT 24"
+        )
+    if "product_notify_cooldown_hours" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_products ADD COLUMN product_notify_cooldown_hours INTEGER NOT NULL DEFAULT 72"
+        )
+
+
+def migrate_stock_schedule_columns(db):
+    """Add Phase 2G per-stock check interval settings."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(tracked_stocks)").fetchall()
+    }
+    if "stock_check_interval_minutes" not in existing_columns:
+        db.execute(
+            "ALTER TABLE tracked_stocks ADD COLUMN stock_check_interval_minutes INTEGER NOT NULL DEFAULT 5"
+        )
 
 
 class ProductFetchError(Exception):
@@ -380,6 +409,40 @@ def env_int(name, default):
     except ValueError:
         return default
     return max(value, 0)
+
+
+def local_timezone():
+    """Return the configured display timezone with a safe default."""
+    timezone_name = os.environ.get("APP_TIMEZONE", "America/Los_Angeles").strip()
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("America/Los_Angeles")
+
+
+def format_local_time(value=None):
+    """Format a timestamp for Telegram text using DadDeals display timezone."""
+    if value is None:
+        timestamp = datetime.now(timezone.utc)
+    elif isinstance(value, datetime):
+        timestamp = value
+    else:
+        text = str(value).strip()
+        try:
+            timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                timestamp = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return text
+
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    local_timestamp = timestamp.astimezone(local_timezone())
+    return (
+        f"{local_timestamp:%b} {local_timestamp.day}, "
+        f"{local_timestamp.year}, {local_timestamp:%I:%M %p}"
+    )
 
 
 def current_usage_month():
@@ -1355,8 +1418,89 @@ def latest_product_price(db, product_id):
     return row["current_price"] if row else None
 
 
+def latest_check_age_hours(db, table_name, id_column, item_id):
+    """Return the age in hours of the latest check row, or None."""
+    row = db.execute(
+        f"""
+        SELECT (julianday('now') - julianday(checked_at)) * 24.0 AS age_hours
+        FROM {table_name}
+        WHERE {id_column} = ?
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (item_id,),
+    ).fetchone()
+    if row is None or row["age_hours"] is None:
+        return None
+    return float(row["age_hours"])
+
+
+def product_due_status(db, product):
+    """Return whether a scheduled product check is due."""
+    interval_hours = int(row_value(product, "product_check_interval_hours", 24) or 24)
+    age_hours = latest_check_age_hours(db, "price_checks", "product_id", product["id"])
+    if age_hours is None:
+        return True, "Product check is due because it has not been checked yet."
+    if age_hours >= interval_hours:
+        return True, f"Product check is due; last check was {age_hours:.1f} hour(s) ago."
+    return (
+        False,
+        f"Product check is not due yet; last check was {age_hours:.1f} hour(s) ago "
+        f"and this product interval is {interval_hours} hour(s).",
+    )
+
+
+def stock_due_status(db, stock):
+    """Return whether a scheduled stock check is due."""
+    interval_minutes = int(row_value(stock, "stock_check_interval_minutes", 5) or 5)
+    age_hours = latest_check_age_hours(db, "stock_checks", "stock_id", stock["id"])
+    if age_hours is None:
+        return True, "Stock check is due because it has not been checked yet."
+    age_minutes = age_hours * 60
+    if age_minutes >= interval_minutes:
+        return True, f"Stock check is due; last check was {age_minutes:.1f} minute(s) ago."
+    return (
+        False,
+        f"Stock check is not due yet; last check was {age_minutes:.1f} minute(s) ago "
+        f"and this stock interval is {interval_minutes} minute(s).",
+    )
+
+
+def product_alert_cooling_down(db, product, title):
+    """Return True when this product should not create another alert yet."""
+    cooldown_hours = int(row_value(product, "product_notify_cooldown_hours", 72) or 0)
+    if cooldown_hours <= 0:
+        return False, ""
+
+    row = db.execute(
+        """
+        SELECT created_at,
+               (julianday('now') - julianday(created_at)) * 24.0 AS age_hours
+        FROM alerts
+        WHERE item_type = 'product'
+          AND item_id = ?
+          AND title = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (product["id"], title),
+    ).fetchone()
+    if row is None or row["age_hours"] is None:
+        return False, ""
+
+    age_hours = float(row["age_hours"])
+    if age_hours >= cooldown_hours:
+        return False, ""
+
+    remaining = cooldown_hours - age_hours
+    return (
+        True,
+        f"Target is still hit, but product notifications are cooling down for about {remaining:.1f} more hour(s).",
+    )
+
+
 def alert_already_exists_today(db, item_type, item_id, title, message):
-    """Avoid creating the exact same alert more than once per day."""
+    """Avoid creating the same alert title more than once per day."""
     row = db.execute(
         """
         SELECT id
@@ -1364,11 +1508,10 @@ def alert_already_exists_today(db, item_type, item_id, title, message):
         WHERE item_type = ?
           AND item_id = ?
           AND title = ?
-          AND message = ?
           AND date(created_at) = date('now')
         LIMIT 1
         """,
-        (item_type, item_id, title, message),
+        (item_type, item_id, title),
     ).fetchone()
     return row is not None
 
@@ -1405,9 +1548,40 @@ def target_alert_message(label, current_price, target_price):
     )
 
 
-def product_source_alert_message(message, source_url):
-    """Add the exact product page to stored product alert text."""
-    return f"{message}\nSource: {source_url}"
+def product_target_alert_message(product_name, current_price, target_price, source_url):
+    """Build a polished product target alert body for dashboard and Telegram."""
+    return (
+        f"🛒 Product target hit:\n{product_name}\n\n"
+        f"💸 {target_alert_message(product_name, current_price, target_price)}\n\n"
+        f"🔗 Source:\n{source_url}"
+    )
+
+
+def product_big_drop_alert_message(product_name, current_price, drop_percent, source_url):
+    """Build a polished product drop alert body for dashboard and Telegram."""
+    return (
+        f"🛒 Product big drop:\n{product_name}\n\n"
+        f"💸 {product_name} dropped {drop_percent:.1f}% to ${current_price:.2f}.\n\n"
+        f"🔗 Source:\n{source_url}"
+    )
+
+
+def stock_target_alert_message(ticker, current_price, target_price):
+    """Build a polished stock target alert body for dashboard and Telegram."""
+    return (
+        f"📈 Stock target hit:\n{ticker}\n\n"
+        f"💵 {target_alert_message(ticker, current_price, target_price)}\n\n"
+        f"🕒 Checked:\n{format_local_time()}"
+    )
+
+
+def stock_big_drop_alert_message(ticker, current_price, percent_change):
+    """Build a polished stock drop alert body for dashboard and Telegram."""
+    return (
+        f"📉 Stock big drop:\n{ticker}\n\n"
+        f"💵 {ticker} moved {percent_change:.1f}% to ${current_price:.2f}.\n\n"
+        f"🕒 Checked:\n{format_local_time()}"
+    )
 
 
 def telegram_settings():
@@ -1424,6 +1598,48 @@ def telegram_settings():
 def short_error(message):
     """Keep delivery errors short and safe for storage."""
     return message.replace("\n", " ").strip()[:180]
+
+
+def telegram_quiet_settings():
+    """Read Telegram quiet hours settings without affecting alert creation."""
+    return {
+        "enabled": env_flag("TELEGRAM_QUIET_HOURS_ENABLED", False),
+        "start": os.environ.get("TELEGRAM_QUIET_START", "22:00").strip(),
+        "end": os.environ.get("TELEGRAM_QUIET_END", "07:00").strip(),
+        "timezone": os.environ.get("TELEGRAM_QUIET_TIMEZONE", "America/Los_Angeles").strip()
+        or "America/Los_Angeles",
+    }
+
+
+def parse_hhmm(value):
+    """Parse a HH:MM quiet-hours value."""
+    try:
+        hour_text, minute_text = value.split(":", 1)
+        return time(hour=int(hour_text), minute=int(minute_text))
+    except (TypeError, ValueError):
+        return None
+
+
+def telegram_quiet_hours_active(now=None):
+    """Return True when Telegram delivery should pause for quiet hours."""
+    settings = telegram_quiet_settings()
+    if not settings["enabled"]:
+        return False
+
+    start_time = parse_hhmm(settings["start"])
+    end_time = parse_hhmm(settings["end"])
+    if start_time is None or end_time is None:
+        return False
+
+    try:
+        quiet_timezone = ZoneInfo(settings["timezone"])
+    except ZoneInfoNotFoundError:
+        quiet_timezone = ZoneInfo("America/Los_Angeles")
+
+    current_time = (now or datetime.now(timezone.utc)).astimezone(quiet_timezone).time()
+    if start_time <= end_time:
+        return start_time <= current_time < end_time
+    return current_time >= start_time or current_time < end_time
 
 
 def send_telegram_message(text):
@@ -1466,8 +1682,11 @@ def send_telegram_message(text):
 
 
 def alert_text(alert):
-    """Format a simple Telegram message for one alert row."""
-    return f"DadDeals alert\n\n{alert['title']}\n{alert['message']}"
+    """Format one alert row for Telegram."""
+    message = alert["message"] or ""
+    if "DadDeals Alert" in message:
+        return message
+    return f"‼️ DadDeals Alert ‼️\n\n{message}"
 
 
 def mark_alert_sent(db, alert_id):
@@ -1519,6 +1738,12 @@ def send_unsent_alerts():
 
         print("DadDeals Telegram delivery starting")
         print(f"Unsent alerts found: {len(alerts)}")
+
+        if alerts and telegram_quiet_hours_active():
+            print(
+                "Telegram quiet hours are active. Alerts stayed unsent and will be tried later."
+            )
+            return {"sent": 0, "failed": 0, "total": len(alerts)}
 
         if not alerts:
             print("No Telegram messages to send.")
@@ -1610,11 +1835,13 @@ def check_product_alerts(db, product, current_price, previous_price, target_pric
         and current_price <= target_price
     ):
         title = f"Product target hit: {product['name']}"
-        message = product_source_alert_message(
-            target_alert_message(product["name"], current_price, target_price),
-            source_url,
+        cooling_down, cooldown_message = product_alert_cooling_down(db, product, title)
+        message = product_target_alert_message(
+            product["name"], current_price, target_price, source_url
         )
-        if create_alert(db, "product", product["id"], title, message, dry_run):
+        if cooling_down:
+            messages.append(cooldown_message)
+        elif create_alert(db, "product", product["id"], title, message, dry_run):
             alerts_created += 1
             messages.append(message)
 
@@ -1622,12 +1849,13 @@ def check_product_alerts(db, product, current_price, previous_price, target_pric
         drop_percent = ((previous_price - current_price) / previous_price) * 100
         if product["notify_on_big_drop"] and drop_percent >= product["big_drop_percent"]:
             title = f"Product big drop: {product['name']}"
-            message = (
-                f"{product['name']} dropped {drop_percent:.1f}% "
-                f"to ${current_price:.2f}."
+            cooling_down, cooldown_message = product_alert_cooling_down(db, product, title)
+            message = product_big_drop_alert_message(
+                product["name"], current_price, drop_percent, source_url
             )
-            message = product_source_alert_message(message, source_url)
-            if create_alert(db, "product", product["id"], title, message, dry_run):
+            if cooling_down:
+                messages.append(cooldown_message)
+            elif create_alert(db, "product", product["id"], title, message, dry_run):
                 alerts_created += 1
                 messages.append(message)
 
@@ -1972,6 +2200,11 @@ def check_amazon_product(db, product, dry_run, force=False):
 
 def check_product(db, product, dry_run, force=False, force_crawlbase=False):
     """Route Amazon URLs to Canopy support and other URLs to the exact checker."""
+    if not force:
+        due, due_message = product_due_status(db, product)
+        if not due:
+            return product_result(product["name"], None, latest_product_price(db, product["id"]), 0, [due_message], "skipped")
+
     if force_crawlbase:
         return check_crawlbase_only_product(db, product, dry_run, force=force)
     if is_amazon_url(product["url"]):
@@ -2072,12 +2305,25 @@ def check_exact_product(db, product, dry_run, force=False):
     )
 
 
-def check_stock(db, stock, dry_run):
+def check_stock(db, stock, dry_run, force=False):
     """Fetch and store one real yfinance stock check."""
     ticker = clean_ticker(stock["ticker"])
     messages = []
     alerts_created = 0
     target_price = stock["target_price"]
+
+    if not force:
+        due, due_message = stock_due_status(db, stock)
+        if not due:
+            return {
+                "ticker": ticker,
+                "current_price": None,
+                "previous_close": None,
+                "percent_change": None,
+                "alerts_created": 0,
+                "messages": [due_message],
+                "status": "skipped",
+            }
 
     try:
         current_price, previous_close, percent_change = fetch_stock_prices(ticker)
@@ -2148,7 +2394,7 @@ def check_stock(db, stock, dry_run):
         and current_price <= target_price
     ):
         title = f"Stock target hit: {stock['ticker']}"
-        message = target_alert_message(stock["ticker"], current_price, target_price)
+        message = stock_target_alert_message(stock["ticker"], current_price, target_price)
         if create_alert(db, "stock", stock["id"], title, message, dry_run):
             alerts_created += 1
             messages.append(message)
@@ -2159,7 +2405,7 @@ def check_stock(db, stock, dry_run):
             and percent_change <= -abs(stock["daily_drop_percent"])
         ):
             title = f"Stock big drop: {stock['ticker']}"
-            message = f"{stock['ticker']} moved {percent_change:.1f}% to ${current_price:.2f}."
+            message = stock_big_drop_alert_message(stock["ticker"], current_price, percent_change)
             if create_alert(db, "stock", stock["id"], title, message, dry_run):
                 alerts_created += 1
                 messages.append(message)
@@ -2232,6 +2478,11 @@ def run_worker(dry_run):
                     f"({result['percent_change']:.1f}%), "
                     f"alerts: {result['alerts_created']}"
                 )
+            elif result["status"] == "skipped":
+                print(
+                    f"  - {result['ticker']}: skipped - "
+                    f"{result['messages'][0]}"
+                )
             else:
                 print(
                     f"  - {result['ticker']}: check failed - "
@@ -2261,6 +2512,9 @@ def health_check():
 
         token, chat_id = telegram_settings()
         print(f"Telegram configured: {'yes' if token and chat_id else 'no'}")
+        quiet = telegram_quiet_settings()
+        print(f"Telegram quiet hours enabled: {'yes' if quiet['enabled'] else 'no'}")
+        print(f"Telegram quiet hours: {quiet['start']} to {quiet['end']} ({quiet['timezone']})")
 
         canopy = canopy_settings()
         canopy_usage = api_usage_count(db, CANOPY_PROVIDER)
@@ -2293,6 +2547,9 @@ def health_check():
         ).fetchone()["count"]
         print(f"Active products: {active_products}")
         print(f"Active stocks: {active_stocks}")
+        print("Product default check interval: 24 hour(s)")
+        print("Product default notification cooldown: 72 hour(s)")
+        print("Stock default check interval: 5 minute(s)")
         print(f"Last product check: {latest_timestamp(db, 'price_checks', 'checked_at')}")
         print(f"Last stock check: {latest_timestamp(db, 'stock_checks', 'checked_at')}")
         print(f"Last alert: {latest_timestamp(db, 'alerts', 'created_at')}")

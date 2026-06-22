@@ -13,6 +13,58 @@
 </section>
 
 <section class="panel">
+    <h2>Check Now</h2>
+    <p class="muted">This checks only {{ stock.ticker }}. Dashboard quotes show the latest saved quote, not guaranteed real-time trading data.</p>
+    <form action="{{ url_for('check_stock_now', stock_id=stock.id) }}" method="post" data-confirm="Check {{ stock.ticker }} now?">
+        <button class="primary-button" type="submit">Check Now</button>
+    </form>
+</section>
+
+<section class="panel">
+    <h2>Latest Saved Quote</h2>
+    <dl class="details">
+        <div>
+            <dt>Latest price</dt>
+            <dd>{{ "$%.2f"|format(summary.latest_price) if summary.latest_price is not none else "No price checked yet" }}</dd>
+        </div>
+        <div>
+            <dt>Last checked</dt>
+            <dd>{{ summary.last_checked_at|local_time if summary.last_checked_at else "Never checked" }}</dd>
+        </div>
+        <div>
+            <dt>Check status</dt>
+            <dd><span class="status {{ summary.last_status }}">{{ summary.last_status_label }}</span></dd>
+        </div>
+        <div>
+            <dt>Percent move</dt>
+            <dd>{{ "%.1f%%"|format(summary.percent_change) if summary.percent_change is not none else "Not available" }}</dd>
+        </div>
+    </dl>
+</section>
+
+<section class="panel">
+    <h2>Stock Price Graph</h2>
+    {% if graph_points|length >= 2 %}
+        <svg class="stock-chart" viewBox="0 0 320 140" role="img" aria-label="Recent saved stock prices">
+            <polyline
+                fill="none"
+                stroke="currentColor"
+                stroke-width="3"
+                points="{% for point in graph_points %}{{ point.x }},{{ point.y }} {% endfor %}"
+            />
+            {% for point in graph_points %}
+                <circle cx="{{ point.x }}" cy="{{ point.y }}" r="3">
+                    <title>{{ point.checked_at }} - {{ "$%.2f"|format(point.price) }}</title>
+                </circle>
+            {% endfor %}
+        </svg>
+    {% else %}
+        <div class="empty-state">Not enough data for a graph yet.</div>
+    {% endif %}
+</section>
+
+<section class="panel">
+    <h2>Tracking Settings</h2>
     <dl class="details">
         <div>
             <dt>Target price</dt>
@@ -29,6 +81,10 @@
         <div>
             <dt>Status</dt>
             <dd><span class="status {{ stock.status }}">{{ stock.status|title }}</span></dd>
+        </div>
+        <div>
+            <dt>Check frequency</dt>
+            <dd>Every {{ stock.stock_check_interval_minutes }} minute(s)</dd>
         </div>
         <div>
             <dt>Target alerts</dt>

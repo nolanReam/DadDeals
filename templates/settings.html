@@ -54,6 +54,29 @@
         </article>
         <article class="card">
             <div class="card-top">
+                <h3>Telegram Quiet Hours</h3>
+                {% if telegram_quiet.enabled %}
+                    <span class="status active">On</span>
+                {% else %}
+                    <span class="status paused">Off</span>
+                {% endif %}
+            </div>
+            <p>{{ telegram_quiet.start }} to {{ telegram_quiet.end }}</p>
+            <p class="muted">{{ telegram_quiet.timezone }}</p>
+        </article>
+        <article class="card">
+            <h3>Product Defaults</h3>
+            <p>Check every {{ product_default_check_hours }} hour(s)</p>
+            <p>Notify again at most every {{ product_default_cooldown_hours }} hour(s)</p>
+            <p class="muted">Each product can override these on its edit page.</p>
+        </article>
+        <article class="card">
+            <h3>Stock Watchlist</h3>
+            <p>Default check interval: {{ stock_default_check_minutes }} minute(s)</p>
+            <p class="muted">Dashboard quotes are latest saved quotes from SQLite, not guaranteed real-time trading data.</p>
+        </article>
+        <article class="card">
+            <div class="card-top">
                 <h3>Canopy Amazon</h3>
                 {% if canopy.enabled and canopy.api_key_present and canopy.request_count < canopy.monthly_limit %}
                     <span class="status active">Ready</span>

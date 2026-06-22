@@ -53,20 +53,21 @@
                     {% if summary.last_status in ["failed", "skipped"] and summary.last_message %}
                         <p class="muted">{{ summary.last_message }}</p>
                     {% endif %}
+                    {% if summary.cooling_down %}
+                        <p class="muted">Target is hit, but Telegram notification is cooling down.</p>
+                    {% endif %}
                     <p>Target: {{ "$%.2f"|format(product.target_price) if product.target_price is not none else "Not set" }}</p>
                     <p>Big drop: {{ "%.1f%%"|format(product.big_drop_percent) if product.big_drop_percent is not none else "Not set" }}</p>
                     <div class="button-row">
                         <a class="secondary-button" href="{{ url_for('product_detail', product_id=product.id) }}">View</a>
                         <a class="small-button" href="{{ url_for('edit_product', product_id=product.id) }}">Edit</a>
-                        {% if summary.last_status in ["failed", "skipped"] %}
-                            <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
-                                <button class="small-button" type="submit">Retry</button>
+                        <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
+                            <button class="small-button" type="submit">Retry</button>
+                        </form>
+                        {% if product.allow_crawlbase_fallback or product.prefer_crawlbase %}
+                            <form action="{{ url_for('retry_product_check_with_crawlbase', product_id=product.id) }}" method="post" data-confirm="Retry this product with Crawlbase now? This may use one Crawlbase request.">
+                                <button class="small-button" type="submit">Retry with Crawlbase</button>
                             </form>
-                            {% if product.allow_crawlbase_fallback or product.prefer_crawlbase %}
-                                <form action="{{ url_for('retry_product_check_with_crawlbase', product_id=product.id) }}" method="post" data-confirm="Retry this product with Crawlbase now? This may use one Crawlbase request.">
-                                    <button class="small-button" type="submit">Retry with Crawlbase</button>
-                                </form>
-                            {% endif %}
                         {% endif %}
                     </div>
                 </article>
@@ -82,19 +83,31 @@
     {% if stocks %}
         <div class="card-grid">
             {% for stock in stocks %}
-                <article class="card">
+                {% set summary = stock.check_summary %}
+                <article class="card stock-card" data-stock-id="{{ stock.id }}">
                     <div class="card-top">
                         <h3>{{ stock.ticker }}</h3>
                         <div class="status-stack">
                             <span class="status {{ stock.status }}">{{ stock.status|title }}</span>
-                            <span class="status {{ stock.display_status_class }}">{{ stock.display_status }}</span>
+                            <span class="status {{ stock.display_status_class }}" data-stock-status>{{ stock.display_status }}</span>
                         </div>
                     </div>
                     <p>{{ stock.company_name }}</p>
+                    <p class="price-line" data-stock-price>{{ "$%.2f"|format(summary.latest_price) if summary.latest_price is not none else "No price checked yet" }}</p>
+                    <p>Latest saved quote</p>
                     <p>Target: {{ "$%.2f"|format(stock.target_price) if stock.target_price is not none else "Not set" }}</p>
+                    <p>Last check: <span data-stock-checked>{{ summary.last_checked_at|local_time if summary.last_checked_at else "Never checked" }}</span></p>
+                    {% if summary.percent_change is not none %}
+                        <p>Move: <span data-stock-change>{{ "%.1f%%"|format(summary.percent_change) }}</span></p>
+                    {% else %}
+                        <p>Move: <span data-stock-change>Not available</span></p>
+                    {% endif %}
                     <div class="button-row">
                         <a class="secondary-button" href="{{ url_for('stock_detail', stock_id=stock.id) }}">View</a>
                         <a class="small-button" href="{{ url_for('edit_stock', stock_id=stock.id) }}">Edit</a>
+                        <form action="{{ url_for('check_stock_now', stock_id=stock.id) }}" method="post" data-confirm="Check this stock now?">
+                            <button class="small-button" type="submit">Check Now</button>
+                        </form>
                     </div>
                 </article>
             {% endfor %}
