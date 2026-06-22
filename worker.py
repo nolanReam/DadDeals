@@ -222,6 +222,18 @@ def create_alert(db, item_type, item_id, title, message, dry_run):
     return True
 
 
+def target_alert_message(label, current_price, target_price):
+    """Build friendly wording for a target-price alert."""
+    if round(current_price, 2) == round(target_price, 2):
+        return f"{label} is exactly at your ${target_price:.2f} target."
+
+    difference = target_price - current_price
+    return (
+        f"{label} is ${current_price:.2f}, which is "
+        f"${difference:.2f} below your ${target_price:.2f} target."
+    )
+
+
 def telegram_settings():
     """Read Telegram settings from .env/environment."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -392,10 +404,7 @@ def check_product(db, product, dry_run):
         and current_price <= target_price
     ):
         title = f"Product target hit: {product['name']}"
-        message = (
-            f"{product['name']} is ${current_price:.2f}, "
-            f"at or below the ${target_price:.2f} target."
-        )
+        message = target_alert_message(product["name"], current_price, target_price)
         if create_alert(db, "product", product["id"], title, message, dry_run):
             alerts_created += 1
             messages.append(message)
@@ -497,10 +506,7 @@ def check_stock(db, stock, dry_run):
         and current_price <= target_price
     ):
         title = f"Stock target hit: {stock['ticker']}"
-        message = (
-            f"{stock['ticker']} is ${current_price:.2f}, "
-            f"at or below the ${target_price:.2f} target."
-        )
+        message = target_alert_message(stock["ticker"], current_price, target_price)
         if create_alert(db, "stock", stock["id"], title, message, dry_run):
             alerts_created += 1
             messages.append(message)
