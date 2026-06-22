@@ -14,11 +14,60 @@
 
 <section class="panel">
     <h2>Check Now</h2>
-    <p class="muted">To check this product now, run the worker from the DadDeals folder. The web app does not run product checks directly, so the page stays quick on the Raspberry Pi.</p>
-    <code class="command-line">python worker.py --run</code>
+    <p class="muted">Retry this product only. Amazon retries may use one Canopy request if Canopy is enabled and the ASIN can be read.</p>
+    <form action="{{ url_for('retry_product_check', product_id=product.id) }}" method="post" data-confirm="Retry this product price check now?">
+        <button class="primary-button" type="submit">Retry Price Check Now</button>
+    </form>
 </section>
 
 <section class="panel">
+    <h2>Price Summary</h2>
+    <dl class="details">
+        <div>
+            <dt>Initial successful price</dt>
+            <dd>{{ "$%.2f"|format(summary.first_success.current_price) if summary.first_success else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Latest successful price</dt>
+            <dd>{{ "$%.2f"|format(summary.latest_success.current_price) if summary.latest_success else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Previous successful price</dt>
+            <dd>{{ "$%.2f"|format(summary.previous_success.current_price) if summary.previous_success else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Change since first price</dt>
+            <dd>{{ summary.change_since_first if summary.change_since_first else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Change since previous price</dt>
+            <dd>{{ summary.change_since_previous if summary.change_since_previous else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Last checked</dt>
+            <dd>{{ summary.last_checked_at|local_time if summary.last_checked_at else "Never checked" }}</dd>
+        </div>
+        <div>
+            <dt>Last check status</dt>
+            <dd><span class="status {{ summary.last_status }}">{{ summary.last_status_label }}</span></dd>
+        </div>
+        <div>
+            <dt>Last check message</dt>
+            <dd>{{ summary.last_message if summary.last_message else "No message yet" }}</dd>
+        </div>
+        <div>
+            <dt>Last source</dt>
+            <dd>{{ summary.source_name if summary.source_name else "Not available" }}</dd>
+        </div>
+        <div>
+            <dt>Product page</dt>
+            <dd><a href="{{ summary.source_url or product.url }}" target="_blank" rel="noopener">Open product page</a></dd>
+        </div>
+    </dl>
+</section>
+
+<section class="panel">
+    <h2>Tracking Settings</h2>
     <dl class="details">
         <div>
             <dt>Product page</dt>
@@ -57,7 +106,7 @@
                         <h3>{{ "$%.2f"|format(check.current_price) if check.current_price is not none else "No price" }}</h3>
                         <span class="status {{ check.status }}">{{ check.status|title }}</span>
                     </div>
-                    <p class="muted">{{ check.checked_at }} from {{ check.source_name }}</p>
+                    <p class="muted">{{ check.checked_at|local_time }} from {{ check.source_name }}</p>
                     {% if check.source_url %}
                         <p><a href="{{ check.source_url }}" target="_blank" rel="noopener">Open checked product page</a></p>
                     {% else %}

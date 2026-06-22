@@ -9,6 +9,7 @@ Telegram, prints a summary, and exits.
 
 import argparse
 import io
+import json
 import os
 import re
 import sqlite3
@@ -261,7 +262,7 @@ def fetch_product_price(url):
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=10)
     except requests.Timeout as error:
         raise ProductFetchError("The product page timed out.") from error
     except requests.RequestException as error:
@@ -318,6 +319,8 @@ def canopy_settings():
 def canopy_headers(settings):
     """Build the Canopy authentication header from CANOPY_AUTH_HEADER."""
     mode = settings["auth_header"].strip()
+    if mode.lower() == "auto":
+        mode = "API-KEY"
     if mode.lower() == "authorization":
         return {"Authorization": f"Bearer {settings['api_key']}"}
     return {mode: settings["api_key"]}
@@ -472,7 +475,7 @@ def fetch_canopy_amazon_product(asin, settings, fallback_url):
             "https://rest.canopyapi.co/api/amazon/product",
             params={"asin": asin, "domain": "US"},
             headers=canopy_headers(settings),
-            timeout=20,
+            timeout=10,
         )
     except requests.Timeout as error:
         raise ProductFetchError("Canopy Amazon check timed out.") from error
@@ -490,6 +493,194 @@ def fetch_canopy_amazon_product(asin, settings, fallback_url):
         raise ProductFetchError("Canopy returned a response DadDeals could not read.") from error
 
     return parse_canopy_product(data, asin, fallback_url)
+
+
+def canopy_debug_auth_modes(settings):
+    """Choose which Canopy auth modes the debug command should try."""
+    mode = settings["auth_header"].strip()
+    if mode.lower() == "auto":
+        return ["API-KEY", "Authorization"]
+    if mode.lower() == "authorization":
+        return ["Authorization"]
+    return [mode or "API-KEY"]
+
+
+def canopy_debug_headers(api_key, auth_mode):
+    """Build one debug request auth header without printing the key."""
+    if auth_mode.lower() == "authorization":
+        return {"Authorization": f"Bearer {api_key}"}
+    return {auth_mode: api_key}
+
+
+def response_shape(value, depth=0):
+    """Return a compact, secret-free preview of JSON keys and value types."""
+    if depth >= 3:
+        return type(value).__name__
+    if isinstance(value, dict):
+        preview = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= 20:
+                preview["..."] = f"{len(value) - 20} more key(s)"
+                break
+            key_text = str(key)
+            if any(secret in key_text.lower() for secret in ("key", "token", "secret")):
+                preview[key_text] = "[redacted]"
+            else:
+                preview[key_text] = response_shape(child, depth + 1)
+        return preview
+    if isinstance(value, list):
+        if not value:
+            return []
+        return [{"list_length": len(value), "first_item": response_shape(value[0], depth + 1)}]
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def save_canopy_debug_preview(preview):
+    """Write the last debug response shape without secrets."""
+    log_dir = BASE_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    output_path = log_dir / "canopy_debug_last.json"
+    output_path.write_text(json.dumps(preview, indent=2), encoding="utf-8")
+    return output_path
+
+
+def canopy_debug_fields(data, asin, fallback_url):
+    """Parse Canopy fields useful for diagnosing DadDeals parsing."""
+    parsed = parse_canopy_product(data, asin, fallback_url)
+    price_value = nested_value(
+        data,
+        (
+            "price",
+            "current_price",
+            "currentPrice",
+            "buybox_price",
+            "buyboxPrice",
+            "sale_price",
+            "salePrice",
+            "deal_price",
+            "dealPrice",
+            "price_raw",
+        ),
+    )
+    return {
+        "title": nested_value(data, ("title", "name", "product_title", "productTitle")),
+        "price": parsed["current_price"],
+        "currency": nested_value(data, ("currency", "currency_code", "currencyCode")),
+        "display_price": nested_value(
+            data,
+            ("display_price", "displayPrice", "price_display", "priceDisplay", "formatted_price"),
+        )
+        or (price_value if isinstance(price_value, str) else None),
+        "availability": nested_value(
+            data,
+            ("availability", "availability_status", "availabilityStatus", "stock_status"),
+        ),
+        "source_url": parsed["source_url"],
+    }
+
+
+def debug_canopy(asin):
+    """Diagnose a Canopy Amazon product request without creating alerts."""
+    settings = canopy_settings()
+    asin = asin.strip().upper()
+    print("DadDeals Canopy debug")
+    print(f"ASIN: {asin}")
+    print(f"Canopy Amazon enabled: {'yes' if settings['enabled'] else 'no'}")
+    print(f"Canopy API key present: {'yes' if bool(settings['api_key']) else 'no'}")
+    print(f"Configured auth header: {settings['auth_header']}")
+    print(f"Monthly limit: {settings['monthly_limit']}")
+    print(f"Amazon check interval: {settings['interval_hours']} hour(s)")
+    print("This debug command creates no alerts and sends no Telegram messages.")
+    print("Each real Canopy request made here is counted in DadDeals api_usage.")
+
+    if not re.match(r"^[A-Z0-9]{10}$", asin):
+        print("ASIN format does not look valid. Expected 10 letters/numbers.")
+        return False
+    if not settings["api_key"]:
+        print("Cannot call Canopy because CANOPY_API_KEY is missing or still a placeholder.")
+        return False
+
+    try:
+        import requests
+    except ImportError:
+        print("The requests package is missing. Run pip install -r requirements.txt.")
+        return False
+
+    db = connect_db()
+    try:
+        init_db(db)
+        auth_modes = canopy_debug_auth_modes(settings)
+        fallback_url = f"https://www.amazon.com/dp/{asin}"
+        for auth_mode in auth_modes:
+            print("")
+            print(f"Trying auth mode: {auth_mode}")
+            try:
+                increment_api_usage(db, CANOPY_PROVIDER)
+                response = requests.get(
+                    "https://rest.canopyapi.co/api/amazon/product",
+                    params={"asin": asin, "domain": "US"},
+                    headers=canopy_debug_headers(settings["api_key"], auth_mode),
+                    timeout=30,
+                )
+                db.commit()
+            except requests.Timeout:
+                db.commit()
+                print("Result: timeout after 30 seconds. This points to network/API slowness.")
+                continue
+            except requests.RequestException as error:
+                db.commit()
+                print(f"Result: network error while contacting Canopy: {error.__class__.__name__}")
+                continue
+
+            print(f"HTTP status: {response.status_code}")
+            if response.status_code in {401, 403}:
+                print("Likely auth issue: check CANOPY_API_KEY and CANOPY_AUTH_HEADER.")
+            elif response.status_code == 429:
+                print("Likely rate limit or budget issue from Canopy.")
+
+            try:
+                data = response.json()
+            except ValueError:
+                preview = {"non_json_preview": response.text[:500]}
+                output_path = save_canopy_debug_preview(preview)
+                print(f"Response was not JSON. Saved preview to {output_path}.")
+                continue
+
+            preview = response_shape(data)
+            print("Response shape preview:")
+            print(json.dumps(preview, indent=2))
+
+            if response.status_code >= 400:
+                continue
+
+            try:
+                fields = canopy_debug_fields(data, asin, fallback_url)
+            except ProductFetchError as error:
+                output_path = save_canopy_debug_preview(preview)
+                print(f"DadDeals parsing failed: {error}")
+                print(f"Saved response shape preview to {output_path}.")
+                continue
+
+            print("Parsed Canopy fields:")
+            print(f"  Title: {fields['title'] or 'not found'}")
+            print(f"  Price: {fields['price'] if fields['price'] is not None else 'not found'}")
+            print(f"  Currency: {fields['currency'] or 'not found'}")
+            print(f"  Display price: {fields['display_price'] or 'not found'}")
+            print(f"  Availability: {fields['availability'] or 'not found'}")
+            print(f"  Source URL: {fields['source_url'] or 'not found'}")
+            return True
+
+        return False
+    finally:
+        db.close()
 
 
 def clean_ticker(ticker):
@@ -866,7 +1057,7 @@ def product_result(name, current_price, previous_price, alerts_created, messages
     }
 
 
-def check_amazon_product(db, product, dry_run):
+def check_amazon_product(db, product, dry_run, force=False):
     """Check an Amazon product with optional Canopy support."""
     current_price = None
     previous_price = latest_product_price(db, product["id"])
@@ -892,7 +1083,7 @@ def check_amazon_product(db, product, dry_run):
     settings = canopy_settings()
     due, due_message = amazon_due_status(db, product["id"], settings["interval_hours"])
 
-    if not due:
+    if not due and not force:
         message = f"{due_message} ASIN: {asin}."
         return product_result(product["name"], current_price, previous_price, 0, [message], "skipped")
 
@@ -973,10 +1164,10 @@ def check_amazon_product(db, product, dry_run):
     )
 
 
-def check_product(db, product, dry_run):
+def check_product(db, product, dry_run, force=False):
     """Route Amazon URLs to Canopy support and other URLs to the exact checker."""
     if is_amazon_url(product["url"]):
-        return check_amazon_product(db, product, dry_run)
+        return check_amazon_product(db, product, dry_run, force=force)
     return check_exact_product(db, product, dry_run)
 
 
@@ -1214,15 +1405,25 @@ def parse_args():
     parser.add_argument("--run", action="store_true", help="Save product/stock checks and alerts.")
     parser.add_argument("--send-alerts", action="store_true", help="Send unsent Telegram alerts.")
     parser.add_argument("--test-telegram", action="store_true", help="Send one Telegram test message.")
+    parser.add_argument("--debug-canopy", metavar="ASIN", help="Debug one Canopy Amazon product request.")
     args = parser.parse_args()
 
-    if args.dry_run and (args.run or args.send_alerts or args.test_telegram):
+    if args.dry_run and (args.run or args.send_alerts or args.test_telegram or args.debug_canopy):
         parser.error("--dry-run cannot be combined with other worker actions.")
-    if args.test_telegram and (args.run or args.send_alerts):
+    if args.test_telegram and (args.run or args.send_alerts or args.debug_canopy):
         parser.error("--test-telegram must be run by itself.")
-    if not args.dry_run and not args.run and not args.send_alerts and not args.test_telegram:
+    if args.debug_canopy and (args.run or args.send_alerts):
+        parser.error("--debug-canopy must be run by itself.")
+    if (
+        not args.dry_run
+        and not args.run
+        and not args.send_alerts
+        and not args.test_telegram
+        and not args.debug_canopy
+    ):
         parser.error(
-            "Choose --dry-run, --run, --send-alerts, --run --send-alerts, or --test-telegram."
+            "Choose --dry-run, --run, --send-alerts, --run --send-alerts, "
+            "--test-telegram, or --debug-canopy ASIN."
         )
 
     return args
@@ -1236,6 +1437,9 @@ def main():
 
     if args.test_telegram:
         sys.exit(0 if test_telegram() else 1)
+
+    if args.debug_canopy:
+        sys.exit(0 if debug_canopy(args.debug_canopy) else 1)
 
     if args.run:
         run_worker(dry_run=False)

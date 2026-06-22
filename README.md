@@ -1,6 +1,6 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2A adds optional Canopy API support for Amazon product URLs.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2C.1 adds local timezone display, initial alert delivery, and clearer manual retry behavior.
 
 This phase does not include Scrape.do, proxy scraping, Selenium, Playwright, browser automation, Celery, Redis, Postgres, Docker, product recommendations, or attempts to bypass API limits.
 
@@ -62,6 +62,7 @@ ADMIN_PASSWORD=choose_a_password_for_the_dashboard
 DATABASE_PATH=instance/daddeals.db
 HOST=0.0.0.0
 PORT=5000
+APP_TIMEZONE=America/Los_Angeles
 TELEGRAM_BOT_TOKEN=replace_me_later
 TELEGRAM_CHAT_ID=replace_me_later
 CANOPY_API_KEY=replace_me_later
@@ -327,7 +328,7 @@ There is no reset command in Phase 2A. That is intentional, so a beginner comman
 
 ## Worker Commands
 
-Phase 2A uses exact-URL product checks, optional Canopy API checks for Amazon URLs, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
+Phase 2C.1 uses exact-URL product checks, optional Canopy API checks for Amazon URLs, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, product retry controls, local timezone display, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -351,6 +352,12 @@ Send one Telegram test message without creating an alert row:
 
 ```bash
 python worker.py --test-telegram
+```
+
+Debug one Canopy Amazon API request without creating alerts:
+
+```bash
+python worker.py --debug-canopy B08N5WRWNW
 ```
 
 Create checks and then send unsent alerts:
@@ -379,13 +386,30 @@ Open `Settings` from the top bar after logging in.
 
 The settings page shows:
 
-- app phase label: `DadDeals v2A - Amazon Canopy support`
+- app phase label: `DadDeals v2B - product check controls`
 - whether Telegram appears configured, without showing secrets
 - database path
 - last worker run time based on recent check rows
 - recent `logs/worker.log` status when cron has run
 - saved alert count
 - Canopy Amazon status, API key presence, auth header mode, monthly usage, and Amazon check interval
+- display timezone from `APP_TIMEZONE`
+
+## Timezone Display
+
+DadDeals keeps database timestamps in a simple SQLite-friendly format. User-facing pages format those timestamps with:
+
+```text
+APP_TIMEZONE=America/Los_Angeles
+```
+
+If `APP_TIMEZONE` is missing, DadDeals defaults to `America/Los_Angeles`. This means a stored UTC check time can display on the website as a readable California time, such as:
+
+```text
+Jun 21, 2026, 11:02 PM
+```
+
+This formatting is used on dashboard alert times, product check times, stock check times, product detail history, and Settings last-worker time.
 
 The settings page also has a safe alert cleanup form. It deletes alert records only. It does not delete tracked products, tracked stocks, price checks, or stock checks.
 
@@ -442,6 +466,44 @@ Amazon automatic scraping is not supported or reliable in v1. Amazon often block
 
 When a product target or big-drop alert is created, DadDeals stores the product URL in the alert message. The dashboard renders that URL as a clickable link, and Telegram receives the same source link.
 
+## Product Checks from the Website
+
+When you add a product from the website, DadDeals saves it first, then immediately tries one price check for that product only. It does not run the full worker and does not check every product.
+
+If that initial check creates a normal alert row because your saved thresholds match, DadDeals sends that new alert through Telegram immediately when Telegram is configured. If Telegram fails, the product and alert are still saved, and the dashboard shows the alert delivery status. You can retry delivery later with:
+
+```bash
+python worker.py --send-alerts
+```
+
+If the first check fails, the product is still saved. The dashboard and product detail page show the latest check status and friendly failure message.
+
+Product cards on the dashboard show:
+
+- latest successful price
+- last checked time
+- last check status: success, failed, skipped, or never checked
+- source/store name
+- link to the product source
+- price change since the first successful check
+- price change since the previous successful check
+
+To retry one product:
+
+1. Open the product detail page.
+2. Press `Retry Price Check Now`.
+3. Or, on the dashboard, press `Retry` on a failed or skipped product card.
+
+To retry several failed/skipped products:
+
+1. Open the dashboard.
+2. Press `Retry Failed Product Checks`.
+3. DadDeals retries up to 5 active products whose latest check failed or was skipped.
+
+These website retries check only product rows. They do not run stock checks, do not run the full worker, and do not expose secrets.
+
+Manual product retries bypass `AMAZON_CHECK_INTERVAL_HOURS` for that one product. This is intentional: the interval is for scheduled worker checks, not a user pressing a retry button. Manual retries still respect `CANOPY_MONTHLY_LIMIT`, so DadDeals will not spend Canopy requests after your configured monthly budget is exhausted.
+
 ## Amazon Product Checks with Canopy
 
 Amazon is handled differently because normal product-page scraping often fails. Amazon pages can block automated requests, change markup frequently, or load price details in ways the lightweight BeautifulSoup checker cannot read. DadDeals does not use Selenium, Playwright, proxy scraping, or browser automation because those approaches are heavier and more fragile on a Raspberry Pi 3 B.
@@ -485,7 +547,28 @@ Recommended Amazon frequency:
 AMAZON_CHECK_INTERVAL_HOURS=24
 ```
 
-Daily checks are a better fit than hourly checks because they preserve free-tier requests. If an Amazon item was checked recently, `worker.py --dry-run` will say it is not due yet. DadDeals avoids writing noisy skipped rows every hour.
+Daily scheduled checks are a better fit than hourly checks because they preserve free-tier requests. If an Amazon item was checked recently, `worker.py --dry-run` will say it is not due yet. DadDeals avoids writing noisy skipped rows every hour.
+
+Website retry buttons bypass this interval for the selected product only. Scheduled worker commands and `scripts/run_worker.sh` still respect `AMAZON_CHECK_INTERVAL_HOURS`.
+
+For short testing only, you can temporarily set:
+
+```text
+AMAZON_CHECK_INTERVAL_HOURS=0
+```
+
+Then run a manual retry from the website or run:
+
+```bash
+python worker.py --dry-run
+python worker.py --run
+```
+
+Set it back afterward:
+
+```text
+AMAZON_CHECK_INTERVAL_HOURS=24
+```
 
 Do not create multiple Canopy accounts, rotate API keys, or try to bypass API limits. If you need more than the free budget, use the plan or limit that fits your real usage.
 
@@ -503,6 +586,73 @@ python worker.py --run
 ```
 
 If Canopy is disabled or missing a key, DadDeals saves a skipped Amazon check with a message telling you to open the product page manually. If Canopy is enabled and the item is due, `--run` calls Canopy, stores the returned price, and uses the same product alert logic as other product checks.
+
+## Canopy Debug Command
+
+Use this when an Amazon check times out or you need to know whether the problem is the API key, auth header, endpoint, network, ASIN extraction, or DadDeals parsing.
+
+Run:
+
+```bash
+python worker.py --debug-canopy B08N5WRWNW
+```
+
+This command:
+
+- loads `CANOPY_API_KEY`, `CANOPY_AUTH_HEADER`, and related `.env` settings
+- prints whether Canopy is enabled and whether a key is present, without printing the key
+- calls the Canopy Amazon product endpoint with a 30-second timeout
+- prints the HTTP status code
+- prints a redacted response shape preview
+- prints parsed title, price, display price, currency, availability, and source URL when parsing succeeds
+- creates no alerts and sends no Telegram messages
+- counts each actual Canopy request in the local `api_usage` table
+
+To find an ASIN from an Amazon URL, look for the 10-character code after `/dp/` or `/gp/product/`.
+
+Examples:
+
+```text
+https://www.amazon.com/dp/B08N5WRWNW
+https://www.amazon.com/some-product-name/dp/B08N5WRWNW/ref=...
+https://www.amazon.com/gp/product/B08N5WRWNW
+```
+
+The ASIN in all three examples is:
+
+```text
+B08N5WRWNW
+```
+
+Auth header options:
+
+```text
+CANOPY_AUTH_HEADER=API-KEY
+CANOPY_AUTH_HEADER=Authorization
+CANOPY_AUTH_HEADER=auto
+```
+
+`API-KEY` sends:
+
+```text
+API-KEY: <your key>
+```
+
+`Authorization` sends:
+
+```text
+Authorization: Bearer <your key>
+```
+
+`auto` makes the debug command try both modes. Use `auto` only while diagnosing, then set the value that works.
+
+How to interpret common debug results:
+
+- Timeout: Canopy or the network did not respond within 30 seconds. Check Pi internet access and try again later.
+- HTTP 401 or 403: likely API key or auth header issue.
+- HTTP 429: likely Canopy rate limit or request budget issue.
+- JSON response but parsing failed: DadDeals saved a redacted response shape preview to `logs/canopy_debug_last.json` so the parser can be adjusted without exposing secrets.
+- Key missing: `.env` still has `CANOPY_API_KEY=replace_me_later` or the key is blank.
 
 ## Real Stock Checks
 

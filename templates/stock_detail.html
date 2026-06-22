@@ -51,7 +51,7 @@
                         <h3>{{ "$%.2f"|format(check.current_price) if check.current_price is not none else "No price" }}</h3>
                         <span class="status {{ check.status }}">{{ check.status|title }}</span>
                     </div>
-                    <p class="muted">{{ check.checked_at }} for {{ check.ticker }}</p>
+                    <p class="muted">{{ check.checked_at|local_time }} for {{ check.ticker }}</p>
                     {% if check.status == "failed" %}
                         <p><span class="delivery-failed">Check failed</span></p>
                     {% else %}

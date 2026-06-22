@@ -29,7 +29,12 @@
         </article>
         <article class="card">
             <h3>Last Worker Run</h3>
-            <p>{{ last_worker_run if last_worker_run else "No checks yet" }}</p>
+            <p>{{ last_worker_run|local_time if last_worker_run else "No checks yet" }}</p>
+        </article>
+        <article class="card">
+            <h3>Display Timezone</h3>
+            <p>{{ app_timezone }}</p>
+            <p class="muted">Stored timestamps stay database-friendly; DadDeals formats them for this timezone.</p>
         </article>
         <article class="card">
             <h3>Alerts</h3>

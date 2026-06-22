@@ -2,9 +2,11 @@ import os
 import re
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 from flask import (
@@ -44,12 +46,14 @@ def create_app():
     )
     app.config["HOST"] = os.environ.get("HOST", "0.0.0.0")
     app.config["PORT"] = int(os.environ.get("PORT", "5000"))
+    app.config["APP_TIMEZONE"] = os.environ.get("APP_TIMEZONE", "America/Los_Angeles")
 
     # Make sure the instance folder exists. Flask's instance folder is the
     # right place for local data that should not be committed, like SQLite DBs.
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
     app.jinja_env.filters["linkify_urls"] = linkify_urls
+    app.jinja_env.filters["local_time"] = local_time
 
     register_routes(app)
     register_cli_commands(app)
@@ -221,6 +225,42 @@ def linkify_urls(value):
 
     pieces.append(escape(text[last_index:]))
     return Markup("").join(pieces).replace("\n", Markup("<br>"))
+
+
+def local_timezone():
+    """Return the configured display timezone with a safe default."""
+    timezone_name = os.environ.get("APP_TIMEZONE", "America/Los_Angeles").strip()
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("America/Los_Angeles")
+
+
+def local_time(value):
+    """Format a stored SQLite timestamp for display in the configured timezone."""
+    if not value:
+        return ""
+
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        text = str(value).strip()
+        try:
+            timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                timestamp = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return text
+
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+    local_timestamp = timestamp.astimezone(local_timezone())
+    return (
+        f"{local_timestamp:%b} {local_timestamp.day}, "
+        f"{local_timestamp.year}, {local_timestamp:%I:%M %p}"
+    )
 
 
 def login_required(view):
@@ -487,6 +527,179 @@ def decorate_items(rows, latest_statuses, target_hits):
     return decorated
 
 
+def price_change_text(current_price, baseline_price):
+    """Return a friendly price change string for dashboard/detail pages."""
+    if current_price is None or baseline_price is None:
+        return None
+
+    difference = current_price - baseline_price
+    if round(difference, 2) == 0:
+        return "No change"
+
+    direction = "higher" if difference > 0 else "lower"
+    percent_text = ""
+    if baseline_price:
+        percent = abs((difference / baseline_price) * 100)
+        percent_text = f" ({percent:.1f}%)"
+    return f"${abs(difference):.2f} {direction}{percent_text}"
+
+
+def product_check_summary(db, product_id):
+    """Summarize product check history for one product."""
+    latest_check = db.execute(
+        """
+        SELECT *
+        FROM price_checks
+        WHERE product_id = ?
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (product_id,),
+    ).fetchone()
+    successful_checks = db.execute(
+        """
+        SELECT *
+        FROM price_checks
+        WHERE product_id = ?
+          AND status = 'ok'
+          AND current_price IS NOT NULL
+        ORDER BY checked_at ASC, id ASC
+        """,
+        (product_id,),
+    ).fetchall()
+
+    first_success = successful_checks[0] if successful_checks else None
+    latest_success = successful_checks[-1] if successful_checks else None
+    previous_success = successful_checks[-2] if len(successful_checks) >= 2 else None
+    latest_price = latest_success["current_price"] if latest_success else None
+
+    if latest_check is None:
+        status = "never"
+        status_label_text = "Never checked"
+    elif latest_check["status"] == "ok":
+        status = "success"
+        status_label_text = "Success"
+    else:
+        status = latest_check["status"]
+        status_label_text = latest_check["status"].title()
+
+    return {
+        "latest_check": latest_check,
+        "first_success": first_success,
+        "latest_success": latest_success,
+        "previous_success": previous_success,
+        "latest_price": latest_price,
+        "last_checked_at": latest_check["checked_at"] if latest_check else None,
+        "last_status": status,
+        "last_status_label": status_label_text,
+        "last_message": latest_check["message"] if latest_check else None,
+        "source_name": latest_check["source_name"] if latest_check else None,
+        "source_url": latest_check["source_url"] if latest_check else None,
+        "change_since_first": price_change_text(
+            latest_price,
+            first_success["current_price"] if first_success else None,
+        ),
+        "change_since_previous": price_change_text(
+            latest_price,
+            previous_success["current_price"] if previous_success else None,
+        ),
+    }
+
+
+def attach_product_summaries(db, products):
+    """Add check summary fields to dashboard product dictionaries."""
+    for product in products:
+        product["check_summary"] = product_check_summary(db, product["id"])
+    return products
+
+
+def run_single_product_check(db, product, force=False):
+    """Run one product check from the web app without checking every product."""
+    from worker import ProductFetchError, check_product
+
+    try:
+        result = check_product(db, product, dry_run=False, force=force)
+        db.commit()
+        return result, None
+    except ProductFetchError as error:
+        db.rollback()
+        return None, str(error)
+    except Exception:
+        db.rollback()
+        return None, "DadDeals could not finish that product check."
+
+
+def flash_product_check_result(product_name, result, error=None):
+    """Show a friendly result after a web-triggered product check."""
+    if error:
+        flash(f"{product_name} was saved, but the first price check failed: {error}", "error")
+        return
+
+    message = result["messages"][0] if result["messages"] else "Check completed."
+    if result["status"] == "ok":
+        flash(f"{product_name} price check succeeded.", "success")
+    elif result["status"] == "skipped":
+        flash(f"{product_name} price check was skipped: {message}", "error")
+    else:
+        flash(f"{product_name} price check failed: {message}", "error")
+
+
+def send_new_product_alerts(db, product_id, after_alert_id):
+    """Send only new alerts created by the immediate product-add check."""
+    if not telegram_config_present():
+        return {"sent": 0, "failed": 0, "total": 0, "configured": False}
+
+    from worker import alert_text, mark_alert_failed, mark_alert_sent, send_telegram_message
+
+    alerts = db.execute(
+        """
+        SELECT *
+        FROM alerts
+        WHERE id > ?
+          AND item_type = 'product'
+          AND item_id = ?
+          AND sent_at IS NULL
+          AND COALESCE(delivery_status, 'unsent') != 'sent'
+        ORDER BY id ASC
+        """,
+        (after_alert_id, product_id),
+    ).fetchall()
+
+    sent_count = 0
+    failed_count = 0
+    for alert in alerts:
+        ok, error = send_telegram_message(alert_text(alert))
+        if ok:
+            mark_alert_sent(db, alert["id"])
+            sent_count += 1
+        else:
+            mark_alert_failed(db, alert["id"], error)
+            failed_count += 1
+
+    db.commit()
+    return {
+        "sent": sent_count,
+        "failed": failed_count,
+        "total": len(alerts),
+        "configured": True,
+    }
+
+
+def flash_initial_delivery_result(delivery_result):
+    """Show the outcome of initial product alert Telegram delivery."""
+    if not delivery_result["configured"] or delivery_result["total"] == 0:
+        return
+
+    if delivery_result["failed"]:
+        flash(
+            "DadDeals created an alert, but Telegram delivery failed. "
+            "Check Settings and run python worker.py --send-alerts after fixing it.",
+            "error",
+        )
+    elif delivery_result["sent"]:
+        flash("Telegram alert sent for the new product.", "success")
+
+
 def register_cli_commands(app):
     @app.cli.command("init-db")
     def init_db_command():
@@ -525,11 +738,11 @@ def register_routes(app):
         stock_rows = db.execute(
             "SELECT * FROM tracked_stocks ORDER BY created_at DESC"
         ).fetchall()
-        products = decorate_items(
+        products = attach_product_summaries(db, decorate_items(
             product_rows,
             latest_check_statuses(db, "price_checks", "product_id"),
             target_hit_ids(db, "product"),
-        )
+        ))
         stocks = decorate_items(
             stock_rows,
             latest_check_statuses(db, "stock_checks", "stock_id"),
@@ -554,13 +767,14 @@ def register_routes(app):
         return render_template(
             "settings.html",
             page_title="Settings",
-            phase_label="DadDeals v2A - Amazon Canopy support",
+            phase_label="DadDeals v2C.1 - local time and retry polish",
             telegram_ready=telegram_config_present(),
             database_path=database_path(),
             last_worker_run=latest_worker_run_time(db),
             worker_log=worker_log_summary(),
             alert_count=alert_count,
             canopy=canopy_status(db),
+            app_timezone=os.environ.get("APP_TIMEZONE", "America/Los_Angeles"),
         )
 
     @app.route("/alerts/clear-old", methods=["POST"])
@@ -663,7 +877,7 @@ def register_routes(app):
                 )
 
             db = get_db()
-            db.execute(
+            cursor = db.execute(
                 """
                 INSERT INTO tracked_products (
                     name, url, target_price, big_drop_percent,
@@ -682,7 +896,16 @@ def register_routes(app):
                 ),
             )
             db.commit()
+            product = get_product_or_404(cursor.lastrowid)
+            last_alert_id = db.execute(
+                "SELECT COALESCE(MAX(id), 0) AS max_id FROM alerts"
+            ).fetchone()["max_id"]
+            result, error = run_single_product_check(db, product, force=True)
             flash("Product added.", "success")
+            flash_product_check_result(product["name"], result, error)
+            if result and result["alerts_created"]:
+                delivery_result = send_new_product_alerts(db, product["id"], last_alert_id)
+                flash_initial_delivery_result(delivery_result)
             return redirect(url_for("dashboard"))
 
         return render_template("add_product.html", page_title="Add Product", form={})
@@ -705,9 +928,61 @@ def register_routes(app):
         return render_template(
             "product_detail.html",
             product=product,
+            summary=product_check_summary(db, product_id),
             price_checks=price_checks,
             page_title=product["name"],
         )
+
+    @app.route("/products/<int:product_id>/retry-check", methods=["POST"])
+    @login_required
+    def retry_product_check(product_id):
+        db = get_db()
+        product = get_product_or_404(product_id)
+        result, error = run_single_product_check(db, product, force=True)
+        flash_product_check_result(product["name"], result, error)
+        return redirect(request.referrer or url_for("product_detail", product_id=product_id))
+
+    @app.route("/products/retry-failed", methods=["POST"])
+    @login_required
+    def retry_failed_products():
+        db = get_db()
+        products = db.execute(
+            """
+            SELECT tracked_products.*
+            FROM tracked_products
+            JOIN (
+                SELECT product_id, MAX(id) AS latest_id
+                FROM price_checks
+                GROUP BY product_id
+            ) AS latest
+              ON tracked_products.id = latest.product_id
+            JOIN price_checks
+              ON price_checks.id = latest.latest_id
+            WHERE tracked_products.status = 'active'
+              AND price_checks.status IN ('failed', 'skipped')
+            ORDER BY price_checks.checked_at DESC, price_checks.id DESC
+            LIMIT 5
+            """
+        ).fetchall()
+
+        if not products:
+            flash("No failed or skipped product checks need retrying.", "success")
+            return redirect(url_for("dashboard"))
+
+        succeeded = 0
+        not_succeeded = 0
+        for product in products:
+            result, error = run_single_product_check(db, product, force=True)
+            if error or result is None or result["status"] != "ok":
+                not_succeeded += 1
+            else:
+                succeeded += 1
+
+        flash(
+            f"Retried {len(products)} product(s): {succeeded} succeeded, {not_succeeded} still need attention.",
+            "success" if succeeded else "error",
+        )
+        return redirect(url_for("dashboard"))
 
     @app.route("/products/<int:product_id>/edit", methods=["GET", "POST"])
     @login_required
