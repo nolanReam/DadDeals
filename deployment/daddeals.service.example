@@ -1,0 +1,30 @@
+# DadDeals web app systemd service example.
+#
+# Default Raspberry Pi path:
+#   /home/pi/DadDeals
+#
+# If your Pi username or project folder is different, change every
+# /home/pi/DadDeals path below before installing this service.
+
+[Unit]
+Description=DadDeals Flask web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/DadDeals
+EnvironmentFile=-/home/pi/DadDeals/.env
+ExecStart=/home/pi/DadDeals/.venv/bin/gunicorn --workers 1 --threads 2 --bind 0.0.0.0:5000 app:app
+Restart=on-failure
+RestartSec=5
+
+# Keep logs in the normal systemd journal. The service does not print secrets,
+# and .env values are loaded from the file instead of being written here.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -4,3 +4,4 @@ requests>=2.31,<3.0
 yfinance>=0.2,<1.0
 beautifulsoup4>=4.12,<5.0
 lxml>=5.0,<7.0
+gunicorn>=22.0,<24.0

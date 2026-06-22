@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1G.1 adds alert management polish and source links for product price alerts.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1H adds lightweight Raspberry Pi web service deployment with Gunicorn and systemd.
 
-This phase does not include search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, Gunicorn/systemd setup, or Nginx config.
+This phase does not include Nginx, HTTPS, public internet access, search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, or heavy deployment tooling.
 
 ## Project Structure
 
@@ -15,6 +15,7 @@ DadDeals/
 |-- .env.example
 |-- .gitignore
 |-- README.md
+|-- deployment/
 |-- scripts/
 |-- templates/
 |-- static/
@@ -45,7 +46,7 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
-This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, and lxml.
+This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, lxml, and Gunicorn.
 
 Create your real local `.env` file:
 
@@ -130,7 +131,7 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
-This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, and lxml.
+This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, lxml, and Gunicorn.
 
 Create your real local `.env` file:
 
@@ -215,6 +216,100 @@ Then open something like this from your phone:
 http://192.168.1.50:5000
 ```
 
+## Run DadDeals Website on Boot
+
+Use this after the manual Raspberry Pi setup works. `python app.py` is still useful for beginner testing, but it only keeps the site online while that terminal is open. Gunicorn runs the Flask app more reliably, and systemd starts it again after reboot or a crash.
+
+DadDeals uses a small Gunicorn command for the Raspberry Pi 3 B:
+
+```bash
+gunicorn --workers 1 --threads 2 --bind 0.0.0.0:5000 app:app
+```
+
+The `app:app` part means "load the `app` object from `app.py`." Keep `python app.py` for manual testing; use systemd for the always-on website.
+
+Before installing the service, make sure requirements are installed:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+python app.py --init-db
+```
+
+The example service file is:
+
+```text
+deployment/daddeals.service.example
+```
+
+It assumes the project is here:
+
+```text
+/home/pi/DadDeals
+```
+
+If your Pi username or project path is different, edit the service file first:
+
+```bash
+nano deployment/daddeals.service.example
+```
+
+Change these values if needed:
+
+```text
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/DadDeals
+EnvironmentFile=-/home/pi/DadDeals/.env
+ExecStart=/home/pi/DadDeals/.venv/bin/gunicorn --workers 1 --threads 2 --bind 0.0.0.0:5000 app:app
+```
+
+Install with the helper script:
+
+```bash
+chmod +x scripts/install_web_service.sh
+./scripts/install_web_service.sh
+```
+
+Or install manually:
+
+```bash
+sudo cp deployment/daddeals.service.example /etc/systemd/system/daddeals.service
+sudo systemctl daemon-reload
+sudo systemctl enable daddeals.service
+sudo systemctl restart daddeals.service
+```
+
+Useful service commands:
+
+```bash
+sudo systemctl status daddeals.service
+sudo systemctl stop daddeals.service
+sudo systemctl start daddeals.service
+sudo systemctl restart daddeals.service
+```
+
+View website logs:
+
+```bash
+journalctl -u daddeals.service -n 80 --no-pager
+journalctl -u daddeals.service -f
+```
+
+Open the site from your phone:
+
+```text
+http://<pi-ip>:5000
+```
+
+Use `hostname -I` on the Pi to find `<pi-ip>`. The IP address is more reliable than `raspberrypi.local` if local hostname resolution fails.
+
+The web service and cron worker do different jobs:
+
+- systemd keeps the DadDeals website online.
+- cron runs `worker.py` periodically to check prices/stocks and send alerts.
+- `scripts/run_worker.sh` is still the cron helper; it is separate from `daddeals.service`.
+
 ## Database Commands
 
 Initialize or update missing tables without deleting data:
@@ -223,11 +318,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1G.1. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 1H. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1G.1 uses exact-URL product checks, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, and safer alert management. Multi-site product search and recommendations still come in a later phase.
+Phase 1H uses exact-URL product checks, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -565,6 +660,9 @@ python worker.py --test-telegram
 27. On the Pi, run `chmod +x scripts/run_worker.sh`.
 28. Run `./scripts/run_worker.sh` and confirm `logs/worker.log` gets timestamped start and end lines.
 29. Add one cron line with `crontab -e`, then confirm later runs appear in `logs/worker.log`.
+30. On the Pi, run `chmod +x scripts/install_web_service.sh`.
+31. Run `./scripts/install_web_service.sh` and confirm `sudo systemctl status daddeals.service` shows the website service running.
+32. Reboot the Pi and confirm `http://<pi-ip>:5000` still opens from your phone.
 
 ## Troubleshooting
 
@@ -583,6 +681,15 @@ python app.py --init-db
 ```
 
 If login does not work, check `ADMIN_PASSWORD` in `.env`.
+
+If the website service does not start:
+
+- Run `sudo systemctl status daddeals.service`.
+- Run `journalctl -u daddeals.service -n 80 --no-pager`.
+- Confirm the service file paths match your Pi folder.
+- Confirm `pip install -r requirements.txt` was run inside `.venv`.
+- Confirm `/home/pi/DadDeals/.venv/bin/gunicorn` exists, or update the path in the service file.
+- Confirm `python app.py --init-db` works before using systemd.
 
 If Telegram delivery says it is not configured:
 
