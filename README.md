@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1D adds real stock checks with yfinance while product checks remain simulated.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1E adds Raspberry Pi cron scheduling support for the one-shot worker.
 
-This phase does not include cron jobs, real product scraping, product APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include real product scraping, product APIs, recommendations, systemd web service setup, Nginx config, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
 
 ## Project Structure
 
@@ -15,6 +15,7 @@ DadDeals/
 |-- .env.example
 |-- .gitignore
 |-- README.md
+|-- scripts/
 |-- templates/
 |-- static/
 `-- instance/
@@ -181,6 +182,13 @@ Run checks and send any new unsent alerts in one command:
 python worker.py --run --send-alerts
 ```
 
+Test the Raspberry Pi cron wrapper manually:
+
+```bash
+chmod +x scripts/run_worker.sh
+./scripts/run_worker.sh
+```
+
 Run the app:
 
 ```bash
@@ -215,11 +223,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1D. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 1E. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1D uses simulated product data and real yfinance stock data. Real product checking still comes in a later phase.
+Phase 1E uses simulated product data, real yfinance stock data, Telegram delivery, and optional cron scheduling. Real product checking still comes in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -257,7 +265,7 @@ To view worker results:
 
 If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value.
 
-Daily rise percent is stored on stocks, but Phase 1D does not send rise alerts yet because the UI does not have a separate “notify on rise” setting. That is future work.
+Daily rise percent is stored on stocks, but Phase 1E does not send rise alerts yet because the UI does not have a separate "notify on rise" setting. That is future work.
 
 ## Real Stock Checks
 
@@ -278,7 +286,7 @@ Open the stock detail page to see:
 - check status
 - friendly failure message if the ticker could not be fetched
 
-Products are still simulated in Phase 1D. Only stock checks use yfinance.
+Products are still simulated in Phase 1E. Only stock checks use yfinance.
 
 ## Telegram Setup
 
@@ -328,7 +336,97 @@ python worker.py --run --send-alerts
 
 If Telegram settings are missing, the worker prints a friendly message and marks the delivery attempt as failed without crashing. After fixing `.env`, run `python worker.py --send-alerts` again.
 
-Cron and automatic scheduling come in a later phase. For now, run the worker command manually when you want checks or deliveries.
+## Raspberry Pi Cron
+
+Phase 1E adds a small Bash script for cron:
+
+```bash
+scripts/run_worker.sh
+```
+
+The script:
+
+- changes into the DadDeals project folder
+- uses `.venv/bin/python` directly
+- runs `python worker.py --run --send-alerts`
+- writes output to `logs/worker.log`
+- creates `logs/` if it does not exist
+- prints timestamped start and end lines
+- exits with a nonzero status if the worker fails
+
+On the Pi, make the script executable:
+
+```bash
+chmod +x scripts/run_worker.sh
+```
+
+Test it manually:
+
+```bash
+./scripts/run_worker.sh
+```
+
+View the log:
+
+```bash
+tail -n 80 logs/worker.log
+```
+
+If the script says it cannot find Python, open `scripts/run_worker.sh` and edit `PROJECT_DIR` near the top. For example:
+
+```bash
+PROJECT_DIR="/home/pi/DadDeals"
+```
+
+Edit your cron jobs:
+
+```bash
+crontab -e
+```
+
+Option A, local 9 AM to 4 PM, Monday-Friday:
+
+```cron
+0 9-16 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+```
+
+Option B, U.S. stock market hours from California time, roughly 6 AM to 1 PM, Monday-Friday:
+
+```cron
+0 6-13 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+```
+
+If your Pi username or project path is different, replace `/home/pi/DadDeals` with the real path. You can check the current folder with:
+
+```bash
+pwd
+```
+
+Disable the cron job by editing crontab again and putting `#` at the start of the DadDeals line:
+
+```cron
+# 0 6-13 * * 1-5 /home/pi/DadDeals/scripts/run_worker.sh
+```
+
+Confirm cron is installed:
+
+```bash
+which cron
+```
+
+Confirm cron is running:
+
+```bash
+systemctl status cron
+```
+
+If cron is not running, start it:
+
+```bash
+sudo systemctl start cron
+```
+
+Products are still simulated until a later phase. Cron runs the same worker command you run manually, so it creates simulated product checks, real yfinance stock checks, local alerts, and Telegram delivery attempts.
 
 ## Manual Test Checklist
 
@@ -356,6 +454,9 @@ Cron and automatic scheduling come in a later phase. For now, run the worker com
 22. Add an invalid ticker and confirm the worker records a failed stock check without crashing.
 23. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
 24. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
+25. On the Pi, run `chmod +x scripts/run_worker.sh`.
+26. Run `./scripts/run_worker.sh` and confirm `logs/worker.log` gets timestamped start and end lines.
+27. Add one cron line with `crontab -e`, then confirm later runs appear in `logs/worker.log`.
 
 ## Troubleshooting
 

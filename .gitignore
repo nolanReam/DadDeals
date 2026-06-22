@@ -8,3 +8,5 @@ instance/*.db
 instance/*.db-journal
 instance/*.sqlite
 instance/*.sqlite3
+logs/
+*.log
