@@ -49,18 +49,22 @@
                 <article class="history-item">
                     <div class="card-top">
                         <h3>{{ "$%.2f"|format(check.current_price) if check.current_price is not none else "No price" }}</h3>
-                        <span class="status">{{ check.status|title }}</span>
+                        <span class="status {{ check.status }}">{{ check.status|title }}</span>
                     </div>
                     <p class="muted">{{ check.checked_at }} for {{ check.ticker }}</p>
-                    <p>Previous close: {{ "$%.2f"|format(check.previous_close) if check.previous_close is not none else "Not set" }}</p>
-                    <p>Target: {{ "$%.2f"|format(check.target_price) if check.target_price is not none else "Not set" }}</p>
-                    <p>Change: {{ "%.1f%%"|format(check.percent_change) if check.percent_change is not none else "Not set" }}</p>
+                    {% if check.status == "failed" %}
+                        <p><span class="delivery-failed">Check failed</span></p>
+                    {% else %}
+                        <p>Previous close: {{ "$%.2f"|format(check.previous_close) if check.previous_close is not none else "Not set" }}</p>
+                        <p>Target: {{ "$%.2f"|format(check.target_price) if check.target_price is not none else "Not set" }}</p>
+                        <p>Change: {{ "%.1f%%"|format(check.percent_change) if check.percent_change is not none else "Not set" }}</p>
+                    {% endif %}
                     <p>{{ check.message }}</p>
                 </article>
             {% endfor %}
         </div>
     {% else %}
-        <div class="empty-state">No stock checks yet. Run the worker to create simulated checks.</div>
+        <div class="empty-state">No stock checks yet. Run the worker to fetch real yfinance checks.</div>
     {% endif %}
 </section>
 {% endblock %}

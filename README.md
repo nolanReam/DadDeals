@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1C adds Telegram delivery for alert rows created by the one-shot worker.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1D adds real stock checks with yfinance while product checks remain simulated.
 
-This phase does not include scraping, yfinance, real stock downloads, cron jobs, infinite background loops, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include cron jobs, real product scraping, product APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
 
 ## Project Structure
 
@@ -44,6 +44,8 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
+This installs Flask, python-dotenv, requests, and yfinance.
+
 Create your real local `.env` file:
 
 ```powershell
@@ -72,13 +74,13 @@ python app.py --init-db
 
 This creates the `instance/` folder if needed and creates any missing tables from `schema.sql`. Running it again is safe because the schema uses `CREATE TABLE IF NOT EXISTS`; it does not erase existing data.
 
-Preview the simulated worker without saving anything:
+Preview the worker without saving anything:
 
 ```powershell
 python worker.py --dry-run
 ```
 
-Run one simulated worker pass and save check history plus alerts:
+Run one worker pass and save product checks, real stock checks, and alerts:
 
 ```powershell
 python worker.py --run
@@ -90,7 +92,7 @@ Send unsent alerts through Telegram after you fill in the Telegram settings:
 python worker.py --send-alerts
 ```
 
-Run simulated checks and send any new unsent alerts in one command:
+Run checks and send any new unsent alerts in one command:
 
 ```powershell
 python worker.py --run --send-alerts
@@ -127,6 +129,8 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
+This installs Flask, python-dotenv, requests, and yfinance.
+
 Create your real local `.env` file:
 
 ```bash
@@ -153,13 +157,13 @@ Initialize the database:
 python app.py --init-db
 ```
 
-Preview the simulated worker without saving anything:
+Preview the worker without saving anything:
 
 ```bash
 python worker.py --dry-run
 ```
 
-Run one simulated worker pass and save check history plus alerts:
+Run one worker pass and save product checks, real stock checks, and alerts:
 
 ```bash
 python worker.py --run
@@ -171,7 +175,7 @@ Send unsent alerts through Telegram after you fill in the Telegram settings:
 python worker.py --send-alerts
 ```
 
-Run simulated checks and send any new unsent alerts in one command:
+Run checks and send any new unsent alerts in one command:
 
 ```bash
 python worker.py --run --send-alerts
@@ -211,11 +215,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1C. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 1D. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1C still uses simulated product and stock data only. The worker does not scrape product pages and does not call yfinance. Real product checking and real stock checking come in later phases.
+Phase 1D uses simulated product data and real yfinance stock data. Real product checking still comes in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -235,13 +239,13 @@ Send existing unsent alert rows through Telegram:
 python worker.py --send-alerts
 ```
 
-Create simulated alerts and then send unsent alerts:
+Create checks and then send unsent alerts:
 
 ```bash
 python worker.py --run --send-alerts
 ```
 
-The worker runs once and exits. It reads active products and stocks from SQLite, inserts rows into `price_checks` and `stock_checks`, and creates local rows in `alerts` when simulated values meet your saved thresholds.
+The worker runs once and exits. It reads active products and stocks from SQLite, inserts rows into `price_checks` and `stock_checks`, and creates local rows in `alerts` when values meet your saved thresholds.
 
 To view worker results:
 
@@ -252,6 +256,29 @@ To view worker results:
 5. Open a stock detail page to see recent stock checks.
 
 If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value.
+
+Daily rise percent is stored on stocks, but Phase 1D does not send rise alerts yet because the UI does not have a separate “notify on rise” setting. That is future work.
+
+## Real Stock Checks
+
+Add a stock such as `AAPL` from the dashboard, then run:
+
+```bash
+python worker.py --dry-run
+python worker.py --run
+```
+
+`--dry-run` fetches stock data and prints what would happen, but does not save `stock_checks` or alerts. `--run` saves the real yfinance check result.
+
+Open the stock detail page to see:
+
+- latest yfinance price used by DadDeals
+- previous close
+- percent change
+- check status
+- friendly failure message if the ticker could not be fetched
+
+Products are still simulated in Phase 1D. Only stock checks use yfinance.
 
 ## Telegram Setup
 
@@ -322,11 +349,13 @@ Cron and automatic scheduling come in a later phase. For now, run the worker com
 15. Log out and confirm the dashboard is protected.
 16. On the Raspberry Pi, open the app from a phone at `http://<pi-ip>:5000`.
 17. Run `python worker.py --dry-run` and confirm it prints a summary without saving checks.
-18. Run `python worker.py --run` and confirm it prints a summary with saved checks.
-19. Refresh the dashboard and confirm recent alerts appear if simulated thresholds were met.
-20. Open product and stock detail pages and confirm recent check history appears.
-21. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
-22. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
+18. Add a stock such as `AAPL`.
+19. Run `python worker.py --run` and confirm it prints a summary with saved checks.
+20. Refresh the dashboard and confirm recent alerts appear if thresholds were met.
+21. Open product and stock detail pages and confirm recent check history appears.
+22. Add an invalid ticker and confirm the worker records a failed stock check without crashing.
+23. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
+24. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
 
 ## Troubleshooting
 
@@ -353,6 +382,14 @@ If Telegram delivery says it is not configured:
 - Send one message to your bot before using `getUpdates`.
 - Run `python worker.py --send-alerts` again after editing `.env`.
 
+If yfinance cannot fetch a ticker:
+
+- Confirm the ticker is valid, such as `AAPL` or `TSLA`.
+- Confirm the Raspberry Pi or PC has internet access.
+- Try running `python worker.py --dry-run` again.
+- Check the stock detail page for the friendly failed-check message.
+- Some symbols, funds, or exchanges may need Yahoo Finance-specific ticker formats.
+
 ## Notes for Later Phases
 
-`worker.py` is a simulated checking and Telegram delivery foundation in Phase 1C. Later phases can replace the fake check values with real product checks, yfinance stock checks, and scheduled background work.
+`worker.py` now uses real yfinance stock checks and simulated product checks. Later phases can replace the fake product values with real product checks and add scheduled background work.

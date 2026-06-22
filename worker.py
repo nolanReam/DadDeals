@@ -1,16 +1,19 @@
-"""One-shot simulated worker for DadDeals Phase 1C.
+"""One-shot worker for DadDeals Phase 1D.
 
-This file deliberately avoids background loops, yfinance, scraping, and
-heavyweight dependencies. It reads active rows from SQLite, creates simulated
-check history, creates local alert records when simple thresholds are met,
-optionally sends unsent alerts through Telegram, prints a summary, and exits.
+This file deliberately avoids background loops, product scraping, and
+heavyweight job systems. It reads active rows from SQLite, creates simulated
+product check history, creates real yfinance stock check history, creates local
+alert records when thresholds are met, optionally sends unsent alerts through
+Telegram, prints a summary, and exits.
 """
 
 import argparse
 import hashlib
+import io
 import os
 import sqlite3
-from datetime import date
+import warnings
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -88,19 +91,82 @@ def fake_product_price(product):
     return round(base_price * (1 + offset), 2)
 
 
-def fake_stock_prices(stock):
-    """Create deterministic simulated stock prices.
+def clean_ticker(ticker):
+    """Normalize ticker text before sending it to yfinance."""
+    return ticker.strip().upper()
 
-    The percentage choices include drops and rises so Phase 1B can exercise
-    alert logic without calling yfinance or any external API.
+
+def safe_float(value):
+    """Convert a yfinance/pandas value to a normal float or None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    # NaN is the one float value that does not equal itself.
+    if number != number:
+        return None
+    return number
+
+
+class StockFetchError(Exception):
+    """Friendly error for one ticker failure."""
+
+
+def fetch_stock_prices(ticker):
+    """Fetch latest daily close and previous close from yfinance.
+
+    Phase 1D intentionally keeps this simple. yfinance gives us a small daily
+    price history, and DadDeals uses the latest close as the current/latest
+    price. If markets are open, this may be delayed until yfinance updates.
     """
-    target_price = stock["target_price"]
-    base_price = target_price if target_price is not None else 100.0
-    changes = [-6.5, -3.0, 1.5, 4.0]
-    percent_change = changes[stable_number(f"stock:{stock['id']}:{stock['ticker']}") % 4]
-    previous_close = round(base_price, 2)
-    current_price = round(previous_close * (1 + percent_change / 100), 2)
-    return current_price, previous_close, percent_change
+    try:
+        import yfinance as yf
+    except ImportError as error:
+        raise StockFetchError(
+            "yfinance is not installed. Run pip install -r requirements.txt."
+        ) from error
+
+    symbol = clean_ticker(ticker)
+    if not symbol:
+        raise StockFetchError("Ticker is blank.")
+
+    try:
+        ticker_data = yf.Ticker(symbol)
+        captured_output = io.StringIO()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with redirect_stdout(captured_output), redirect_stderr(captured_output):
+                history = ticker_data.history(
+                    period="5d",
+                    interval="1d",
+                    auto_adjust=False,
+                    timeout=10,
+                )
+    except Exception as error:
+        raise StockFetchError("Could not reach yfinance for this ticker.") from error
+
+    if history is None or history.empty or "Close" not in history:
+        raise StockFetchError("No recent price data came back from yfinance.")
+
+    closes = history["Close"].dropna()
+    if closes.empty:
+        raise StockFetchError("No closing prices came back from yfinance.")
+
+    current_price = safe_float(closes.iloc[-1])
+    if current_price is None:
+        raise StockFetchError("The latest price was not a valid number.")
+
+    if len(closes) >= 2:
+        previous_close = safe_float(closes.iloc[-2])
+    else:
+        previous_close = current_price
+
+    if previous_close is None or previous_close <= 0:
+        raise StockFetchError("Previous close was not available.")
+
+    percent_change = round(((current_price - previous_close) / previous_close) * 100, 2)
+    return round(current_price, 2), round(previous_close, 2), percent_change
 
 
 def latest_product_price(db, product_id):
@@ -118,21 +184,6 @@ def latest_product_price(db, product_id):
     return row["current_price"] if row else None
 
 
-def latest_stock_close(db, stock_id):
-    """Return the last recorded stock price, or None if there is no history."""
-    row = db.execute(
-        """
-        SELECT current_price
-        FROM stock_checks
-        WHERE stock_id = ?
-        ORDER BY checked_at DESC, id DESC
-        LIMIT 1
-        """,
-        (stock_id,),
-    ).fetchone()
-    return row["current_price"] if row else None
-
-
 def alert_already_exists_today(db, item_type, item_id, title, message):
     """Avoid creating the exact same alert more than once per day."""
     row = db.execute(
@@ -143,10 +194,10 @@ def alert_already_exists_today(db, item_type, item_id, title, message):
           AND item_id = ?
           AND title = ?
           AND message = ?
-          AND date(created_at) = ?
+          AND date(created_at) = date('now')
         LIMIT 1
         """,
-        (item_type, item_id, title, message, date.today().isoformat()),
+        (item_type, item_id, title, message),
     ).fetchone()
     return row is not None
 
@@ -326,7 +377,7 @@ def check_product(db, product, dry_run):
             """,
             (
                 product["id"],
-                "Phase 1B simulated checker",
+                "Phase 1D simulated product checker",
                 current_price,
                 previous_price,
                 target_price,
@@ -371,15 +422,53 @@ def check_product(db, product, dry_run):
 
 
 def check_stock(db, stock, dry_run):
-    """Simulate one stock check and return a small result dictionary."""
-    current_price, simulated_previous_close, percent_change = fake_stock_prices(stock)
-    previous_close = latest_stock_close(db, stock["id"]) or simulated_previous_close
-    if previous_close:
-        percent_change = round(((current_price - previous_close) / previous_close) * 100, 2)
-
+    """Fetch and store one real yfinance stock check."""
+    ticker = clean_ticker(stock["ticker"])
     messages = []
     alerts_created = 0
     target_price = stock["target_price"]
+
+    try:
+        current_price, previous_close, percent_change = fetch_stock_prices(ticker)
+        status = "ok"
+        check_message = "Real stock check completed with yfinance."
+    except StockFetchError as error:
+        current_price = None
+        previous_close = None
+        percent_change = None
+        status = "failed"
+        check_message = str(error)
+
+        if not dry_run:
+            db.execute(
+                """
+                INSERT INTO stock_checks (
+                    stock_id, ticker, current_price, previous_close,
+                    target_price, percent_change, status, message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stock["id"],
+                    ticker,
+                    current_price,
+                    previous_close,
+                    target_price,
+                    percent_change,
+                    status,
+                    check_message,
+                ),
+            )
+
+        return {
+            "ticker": ticker,
+            "current_price": current_price,
+            "previous_close": previous_close,
+            "percent_change": percent_change,
+            "alerts_created": 0,
+            "messages": [check_message],
+            "status": status,
+        }
 
     if not dry_run:
         db.execute(
@@ -392,13 +481,13 @@ def check_stock(db, stock, dry_run):
             """,
             (
                 stock["id"],
-                stock["ticker"],
+                ticker,
                 current_price,
                 previous_close,
                 target_price,
                 percent_change,
-                "ok",
-                "Simulated stock check completed.",
+                status,
+                check_message,
             ),
         )
 
@@ -428,12 +517,13 @@ def check_stock(db, stock, dry_run):
                 messages.append(message)
 
     return {
-        "ticker": stock["ticker"],
+        "ticker": ticker,
         "current_price": current_price,
         "previous_close": previous_close,
         "percent_change": percent_change,
         "alerts_created": alerts_created,
         "messages": messages,
+        "status": status,
     }
 
 
@@ -470,13 +560,19 @@ def run_worker(dry_run):
                 f"alerts: {result['alerts_created']}"
             )
 
-        print(f"Stocks checked: {len(stock_results)}")
+        print(f"Stocks checked with yfinance: {len(stock_results)}")
         for result in stock_results:
-            print(
-                f"  - {result['ticker']}: ${result['current_price']:.2f} "
-                f"({result['percent_change']:.1f}%), "
-                f"alerts: {result['alerts_created']}"
-            )
+            if result["status"] == "ok":
+                print(
+                    f"  - {result['ticker']}: ${result['current_price']:.2f} "
+                    f"({result['percent_change']:.1f}%), "
+                    f"alerts: {result['alerts_created']}"
+                )
+            else:
+                print(
+                    f"  - {result['ticker']}: check failed - "
+                    f"{result['messages'][0]}"
+                )
 
         print(f"Alerts {'that would be created' if dry_run else 'created'}: {total_alerts}")
         if dry_run:
