@@ -1,4 +1,4 @@
-"""One-shot worker for DadDeals Phase 1G.
+"""One-shot worker for DadDeals Phase 2A.
 
 This file deliberately avoids background loops, browser automation, and
 heavyweight job systems. It reads active rows from SQLite, checks exact product
@@ -15,8 +15,9 @@ import sqlite3
 import sys
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from dotenv import load_dotenv
 
@@ -27,6 +28,12 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATABASE_PATH = BASE_DIR / "instance" / "daddeals.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
+CANOPY_PROVIDER = "canopy"
+CANOPY_AMAZON_SOURCE = "Amazon via Canopy"
+AMAZON_MANUAL_MESSAGE = (
+    "Amazon automatic checks need Canopy enabled and available monthly requests. "
+    "Open the product page manually."
+)
 
 
 def database_path():
@@ -105,6 +112,59 @@ def product_source_name(url):
     """Return a short source label for a product URL."""
     host = urlparse(url).netloc
     return host or "Exact URL checker"
+
+
+def is_amazon_url(url):
+    """Return True for common Amazon shopping domains."""
+    host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return (
+        host == "amazon.com"
+        or host.startswith("amazon.")
+        or host.endswith(".amazon.com")
+        or ".amazon." in host
+    )
+
+
+def extract_amazon_asin(url):
+    """Extract an ASIN from common Amazon URL paths.
+
+    Supported examples:
+    - /dp/B08N5WRWNW
+    - /gp/product/B08N5WRWNW
+    - /product/B08N5WRWNW
+    Extra path text and query strings are ignored by urlparse.
+    """
+    parsed = urlparse(url)
+    path_parts = [
+        unquote(part).strip()
+        for part in parsed.path.split("/")
+        if unquote(part).strip()
+    ]
+    asin_pattern = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
+
+    for marker in ("dp", "product"):
+        if marker in [part.lower() for part in path_parts]:
+            for index, part in enumerate(path_parts):
+                if part.lower() == marker and index + 1 < len(path_parts):
+                    candidate = path_parts[index + 1].upper()
+                    if asin_pattern.match(candidate):
+                        return candidate
+
+    for index, part in enumerate(path_parts):
+        if part.lower() == "gp" and index + 2 < len(path_parts):
+            if path_parts[index + 1].lower() == "product":
+                candidate = path_parts[index + 2].upper()
+                if asin_pattern.match(candidate):
+                    return candidate
+
+    for part in path_parts:
+        candidate = part.upper()
+        if asin_pattern.match(candidate):
+            return candidate
+
+    return None
 
 
 def parse_price_text(text):
@@ -217,6 +277,219 @@ def fetch_product_price(url):
         raise ProductFetchError("No product price was found on the page.")
 
     return price
+
+
+def env_flag(name, default=False):
+    """Read a simple true/false setting from .env/environment."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name, default):
+    """Read a positive integer setting with a beginner-safe fallback."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(value, 0)
+
+
+def current_usage_month():
+    """Calendar month key used for lightweight API budget tracking."""
+    return datetime.now().strftime("%Y-%m")
+
+
+def canopy_settings():
+    """Read Canopy settings without ever printing the API key."""
+    api_key = os.environ.get("CANOPY_API_KEY", "").strip()
+    if api_key in {"replace_me", "replace_me_later"}:
+        api_key = ""
+    return {
+        "enabled": env_flag("ENABLE_CANOPY_AMAZON", False),
+        "api_key": api_key,
+        "monthly_limit": env_int("CANOPY_MONTHLY_LIMIT", 100),
+        "auth_header": os.environ.get("CANOPY_AUTH_HEADER", "API-KEY").strip() or "API-KEY",
+        "interval_hours": env_int("AMAZON_CHECK_INTERVAL_HOURS", 24),
+    }
+
+
+def canopy_headers(settings):
+    """Build the Canopy authentication header from CANOPY_AUTH_HEADER."""
+    mode = settings["auth_header"].strip()
+    if mode.lower() == "authorization":
+        return {"Authorization": f"Bearer {settings['api_key']}"}
+    return {mode: settings["api_key"]}
+
+
+def api_usage_count(db, provider):
+    """Return this month's request count for one API provider."""
+    row = db.execute(
+        """
+        SELECT request_count
+        FROM api_usage
+        WHERE provider = ?
+          AND usage_month = ?
+        """,
+        (provider, current_usage_month()),
+    ).fetchone()
+    return row["request_count"] if row else 0
+
+
+def increment_api_usage(db, provider):
+    """Count one actual external API request without losing existing rows."""
+    db.execute(
+        """
+        INSERT INTO api_usage (provider, usage_month, request_count, last_request_at)
+        VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(provider, usage_month)
+        DO UPDATE SET
+            request_count = request_count + 1,
+            last_request_at = CURRENT_TIMESTAMP
+        """,
+        (provider, current_usage_month()),
+    )
+
+
+def amazon_due_status(db, product_id, interval_hours):
+    """Return whether an Amazon item is due for another Canopy attempt."""
+    if interval_hours <= 0:
+        return True, "Amazon check is due because the interval is 0 hours."
+
+    row = db.execute(
+        """
+        SELECT checked_at,
+               (julianday('now') - julianday(checked_at)) * 24.0 AS age_hours
+        FROM price_checks
+        WHERE product_id = ?
+          AND source_name = ?
+        ORDER BY checked_at DESC, id DESC
+        LIMIT 1
+        """,
+        (product_id, CANOPY_AMAZON_SOURCE),
+    ).fetchone()
+    if row is None:
+        return True, "Amazon check is due because it has not been checked yet."
+
+    age_hours = row["age_hours"] if row["age_hours"] is not None else interval_hours
+    if age_hours >= interval_hours:
+        return True, f"Amazon check is due; last attempt was {age_hours:.1f} hour(s) ago."
+    return (
+        False,
+        f"Amazon check is not due yet; last attempt was {age_hours:.1f} hour(s) ago "
+        f"and the interval is {interval_hours} hour(s).",
+    )
+
+
+def nested_value(data, names):
+    """Find the first matching key inside a nested Canopy JSON response."""
+    wanted = {name.lower() for name in names}
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if str(key).lower() in wanted and value not in (None, ""):
+                return value
+        for value in data.values():
+            found = nested_value(value, names)
+            if found not in (None, ""):
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = nested_value(value, names)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def price_from_canopy_value(value):
+    """Convert a Canopy price field into a float when possible."""
+    if isinstance(value, (int, float)):
+        return round(float(value), 2) if value > 0 else None
+    if isinstance(value, str):
+        return parse_price_text(value)
+    if isinstance(value, dict):
+        for key in ("value", "amount", "price", "display", "text", "raw"):
+            price = price_from_canopy_value(value.get(key))
+            if price is not None:
+                return price
+    return None
+
+
+def parse_canopy_product(data, asin, fallback_url):
+    """Pull the small set of fields DadDeals needs from Canopy JSON."""
+    price_value = nested_value(
+        data,
+        (
+            "price",
+            "current_price",
+            "currentPrice",
+            "buybox_price",
+            "buyboxPrice",
+            "sale_price",
+            "salePrice",
+            "deal_price",
+            "dealPrice",
+            "price_raw",
+        ),
+    )
+    current_price = price_from_canopy_value(price_value)
+    if current_price is None:
+        raise ProductFetchError("Canopy returned product data, but no price was found.")
+
+    title = nested_value(data, ("title", "name", "product_title", "productTitle"))
+    availability = nested_value(
+        data,
+        ("availability", "availability_status", "availabilityStatus", "stock_status"),
+    )
+    product_link = nested_value(
+        data,
+        ("url", "link", "product_url", "productUrl", "canonical_url", "canonicalUrl"),
+    )
+    source_url = str(product_link or fallback_url)
+    message_parts = [f"Amazon Canopy check completed for ASIN {asin}."]
+    if title:
+        message_parts.append(f"Title: {title}.")
+    if availability:
+        message_parts.append(f"Availability: {availability}.")
+    return {
+        "current_price": current_price,
+        "source_url": source_url,
+        "message": " ".join(message_parts),
+    }
+
+
+def fetch_canopy_amazon_product(asin, settings, fallback_url):
+    """Fetch one Amazon product from Canopy's REST product endpoint."""
+    try:
+        import requests
+    except ImportError as error:
+        raise ProductFetchError(
+            "The requests package is missing. Run pip install -r requirements.txt."
+        ) from error
+
+    try:
+        response = requests.get(
+            "https://rest.canopyapi.co/api/amazon/product",
+            params={"asin": asin, "domain": "US"},
+            headers=canopy_headers(settings),
+            timeout=20,
+        )
+    except requests.Timeout as error:
+        raise ProductFetchError("Canopy Amazon check timed out.") from error
+    except requests.RequestException as error:
+        raise ProductFetchError("Could not reach Canopy for the Amazon check.") from error
+
+    if response.status_code >= 400:
+        raise ProductFetchError(
+            f"Canopy returned HTTP {response.status_code} for the Amazon check."
+        )
+
+    try:
+        data = response.json()
+    except ValueError as error:
+        raise ProductFetchError("Canopy returned a response DadDeals could not read.") from error
+
+    return parse_canopy_product(data, asin, fallback_url)
 
 
 def clean_ticker(ticker):
@@ -513,72 +786,43 @@ def test_telegram():
     return False
 
 
-def check_product(db, product, dry_run):
-    """Fetch and store one exact-URL product check."""
-    current_price = None
-    previous_price = latest_product_price(db, product["id"])
+def save_product_check(
+    db,
+    product,
+    source_name,
+    source_url,
+    current_price,
+    previous_price,
+    target_price,
+    status,
+    message,
+):
+    """Insert one product check row."""
+    db.execute(
+        """
+        INSERT INTO price_checks (
+            product_id, source_name, source_url, current_price, previous_price,
+            target_price, status, message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            product["id"],
+            source_name,
+            source_url,
+            current_price,
+            previous_price,
+            target_price,
+            status,
+            message,
+        ),
+    )
+
+
+def check_product_alerts(db, product, current_price, previous_price, target_price, source_url, dry_run):
+    """Create product target/drop alerts for a successful price check."""
     messages = []
     alerts_created = 0
-    target_price = product["target_price"]
-
-    try:
-        current_price = fetch_product_price(product["url"])
-        status = "ok"
-        check_message = "Exact URL product check completed."
-    except ProductFetchError as error:
-        status = "failed"
-        check_message = str(error)
-
-        if not dry_run:
-            db.execute(
-                """
-                INSERT INTO price_checks (
-                    product_id, source_name, source_url, current_price, previous_price,
-                    target_price, status, message
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    product["id"],
-                    product_source_name(product["url"]),
-                    product["url"],
-                    current_price,
-                    previous_price,
-                    target_price,
-                    status,
-                    check_message,
-                ),
-            )
-
-        return {
-            "name": product["name"],
-            "current_price": current_price,
-            "previous_price": previous_price,
-            "alerts_created": 0,
-            "messages": [check_message],
-            "status": status,
-        }
-
-    if not dry_run:
-        db.execute(
-            """
-            INSERT INTO price_checks (
-                product_id, source_name, source_url, current_price, previous_price,
-                target_price, status, message
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                product["id"],
-                product_source_name(product["url"]),
-                product["url"],
-                current_price,
-                previous_price,
-                target_price,
-                status,
-                check_message,
-            ),
-        )
 
     if (
         target_price is not None
@@ -588,7 +832,7 @@ def check_product(db, product, dry_run):
         title = f"Product target hit: {product['name']}"
         message = product_source_alert_message(
             target_alert_message(product["name"], current_price, target_price),
-            product["url"],
+            source_url,
         )
         if create_alert(db, "product", product["id"], title, message, dry_run):
             alerts_created += 1
@@ -602,19 +846,193 @@ def check_product(db, product, dry_run):
                 f"{product['name']} dropped {drop_percent:.1f}% "
                 f"to ${current_price:.2f}."
             )
-            message = product_source_alert_message(message, product["url"])
+            message = product_source_alert_message(message, source_url)
             if create_alert(db, "product", product["id"], title, message, dry_run):
                 alerts_created += 1
                 messages.append(message)
 
+    return alerts_created, messages
+
+
+def product_result(name, current_price, previous_price, alerts_created, messages, status):
+    """Build the small summary object printed by run_worker."""
     return {
-        "name": product["name"],
+        "name": name,
         "current_price": current_price,
         "previous_price": previous_price,
         "alerts_created": alerts_created,
         "messages": messages,
         "status": status,
     }
+
+
+def check_amazon_product(db, product, dry_run):
+    """Check an Amazon product with optional Canopy support."""
+    current_price = None
+    previous_price = latest_product_price(db, product["id"])
+    target_price = product["target_price"]
+    asin = extract_amazon_asin(product["url"])
+
+    if not asin:
+        message = "Amazon ASIN could not be found in the URL. Open the product page manually."
+        if not dry_run:
+            save_product_check(
+                db,
+                product,
+                CANOPY_AMAZON_SOURCE,
+                product["url"],
+                current_price,
+                previous_price,
+                target_price,
+                "failed",
+                message,
+            )
+        return product_result(product["name"], current_price, previous_price, 0, [message], "failed")
+
+    settings = canopy_settings()
+    due, due_message = amazon_due_status(db, product["id"], settings["interval_hours"])
+
+    if not due:
+        message = f"{due_message} ASIN: {asin}."
+        return product_result(product["name"], current_price, previous_price, 0, [message], "skipped")
+
+    usage_count = api_usage_count(db, CANOPY_PROVIDER)
+    ready = settings["enabled"] and settings["api_key"] and usage_count < settings["monthly_limit"]
+    if not ready:
+        if not settings["enabled"]:
+            reason = "Canopy Amazon is disabled."
+        elif not settings["api_key"]:
+            reason = "Canopy API key is missing."
+        else:
+            reason = f"Canopy monthly limit reached ({usage_count}/{settings['monthly_limit']})."
+        message = f"{AMAZON_MANUAL_MESSAGE} {reason} ASIN: {asin}."
+        if not dry_run:
+            save_product_check(
+                db,
+                product,
+                CANOPY_AMAZON_SOURCE,
+                product["url"],
+                current_price,
+                previous_price,
+                target_price,
+                "skipped",
+                message,
+            )
+        return product_result(product["name"], current_price, previous_price, 0, [message], "skipped")
+
+    if dry_run:
+        message = (
+            f"Amazon Canopy check is due for ASIN {asin}. "
+            "Dry run only: no Canopy request, check row, alert, or API usage was saved."
+        )
+        return product_result(product["name"], current_price, previous_price, 0, [message], "skipped")
+
+    try:
+        increment_api_usage(db, CANOPY_PROVIDER)
+        canopy_product = fetch_canopy_amazon_product(asin, settings, product["url"])
+        current_price = canopy_product["current_price"]
+        source_url = canopy_product["source_url"]
+        check_message = canopy_product["message"]
+        status = "ok"
+    except ProductFetchError as error:
+        message = str(error)
+        save_product_check(
+            db,
+            product,
+            CANOPY_AMAZON_SOURCE,
+            product["url"],
+            current_price,
+            previous_price,
+            target_price,
+            "failed",
+            message,
+        )
+        return product_result(product["name"], current_price, previous_price, 0, [message], "failed")
+
+    save_product_check(
+        db,
+        product,
+        CANOPY_AMAZON_SOURCE,
+        source_url,
+        current_price,
+        previous_price,
+        target_price,
+        status,
+        check_message,
+    )
+    alerts_created, messages = check_product_alerts(
+        db, product, current_price, previous_price, target_price, source_url, dry_run
+    )
+    return product_result(
+        product["name"],
+        current_price,
+        previous_price,
+        alerts_created,
+        messages or [check_message],
+        status,
+    )
+
+
+def check_product(db, product, dry_run):
+    """Route Amazon URLs to Canopy support and other URLs to the exact checker."""
+    if is_amazon_url(product["url"]):
+        return check_amazon_product(db, product, dry_run)
+    return check_exact_product(db, product, dry_run)
+
+
+def check_exact_product(db, product, dry_run):
+    """Fetch and store one exact-URL product check."""
+    current_price = None
+    previous_price = latest_product_price(db, product["id"])
+    target_price = product["target_price"]
+
+    try:
+        current_price = fetch_product_price(product["url"])
+        status = "ok"
+        check_message = "Exact URL product check completed."
+    except ProductFetchError as error:
+        status = "failed"
+        check_message = str(error)
+
+        if not dry_run:
+            save_product_check(
+                db,
+                product,
+                product_source_name(product["url"]),
+                product["url"],
+                current_price,
+                previous_price,
+                target_price,
+                status,
+                check_message,
+            )
+
+        return product_result(product["name"], current_price, previous_price, 0, [check_message], status)
+
+    if not dry_run:
+        save_product_check(
+            db,
+            product,
+            product_source_name(product["url"]),
+            product["url"],
+            current_price,
+            previous_price,
+            target_price,
+            status,
+            check_message,
+        )
+
+    alerts_created, messages = check_product_alerts(
+        db, product, current_price, previous_price, target_price, product["url"], dry_run
+    )
+    return product_result(
+        product["name"],
+        current_price,
+        previous_price,
+        alerts_created,
+        messages,
+        status,
+    )
 
 
 def check_stock(db, stock, dry_run):
@@ -745,7 +1163,7 @@ def run_worker(dry_run):
         mode = "DRY RUN" if dry_run else "RUN"
         print(f"DadDeals worker {mode} complete")
         print(f"Database: {database_path()}")
-        print(f"Products checked with exact URLs: {len(product_results)}")
+        print(f"Products checked: {len(product_results)}")
         for result in product_results:
             if result["status"] == "ok":
                 previous_text = (
@@ -757,6 +1175,11 @@ def run_worker(dry_run):
                     f"  - {result['name']}: ${result['current_price']:.2f} "
                     f"(previous {previous_text}), "
                     f"alerts: {result['alerts_created']}"
+                )
+            elif result["status"] == "skipped":
+                print(
+                    f"  - {result['name']}: skipped - "
+                    f"{result['messages'][0]}"
                 )
             else:
                 print(

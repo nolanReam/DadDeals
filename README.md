@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1H adds lightweight Raspberry Pi web service deployment with Gunicorn and systemd.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 2A adds optional Canopy API support for Amazon product URLs.
 
-This phase does not include Nginx, HTTPS, public internet access, search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, or heavy deployment tooling.
+This phase does not include Scrape.do, proxy scraping, Selenium, Playwright, browser automation, Celery, Redis, Postgres, Docker, product recommendations, or attempts to bypass API limits.
 
 ## Project Structure
 
@@ -64,6 +64,11 @@ HOST=0.0.0.0
 PORT=5000
 TELEGRAM_BOT_TOKEN=replace_me_later
 TELEGRAM_CHAT_ID=replace_me_later
+CANOPY_API_KEY=replace_me_later
+ENABLE_CANOPY_AMAZON=false
+CANOPY_MONTHLY_LIMIT=100
+CANOPY_AUTH_HEADER=API-KEY
+AMAZON_CHECK_INTERVAL_HOURS=24
 ```
 
 Leave the Telegram values as placeholders until you are ready to test message delivery.
@@ -318,11 +323,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1H. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 2A. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, API usage, or delivery history.
 
 ## Worker Commands
 
-Phase 1H uses exact-URL product checks, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
+Phase 2A uses exact-URL product checks, optional Canopy API checks for Amazon URLs, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, safer alert management, and a lightweight systemd web service. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -374,12 +379,13 @@ Open `Settings` from the top bar after logging in.
 
 The settings page shows:
 
-- app phase label: `DadDeals v1 - exact URL tracking`
+- app phase label: `DadDeals v2A - Amazon Canopy support`
 - whether Telegram appears configured, without showing secrets
 - database path
 - last worker run time based on recent check rows
 - recent `logs/worker.log` status when cron has run
 - saved alert count
+- Canopy Amazon status, API key presence, auth header mode, monthly usage, and Amazon check interval
 
 The settings page also has a safe alert cleanup form. It deletes alert records only. It does not delete tracked products, tracked stocks, price checks, or stock checks.
 
@@ -435,6 +441,68 @@ If a product page cannot be fetched or no price is found, DadDeals stores a fail
 Amazon automatic scraping is not supported or reliable in v1. Amazon often blocks automated price checks, so DadDeals will still save an Amazon link, but you may need to check it manually or use a different store page.
 
 When a product target or big-drop alert is created, DadDeals stores the product URL in the alert message. The dashboard renders that URL as a clickable link, and Telegram receives the same source link.
+
+## Amazon Product Checks with Canopy
+
+Amazon is handled differently because normal product-page scraping often fails. Amazon pages can block automated requests, change markup frequently, or load price details in ways the lightweight BeautifulSoup checker cannot read. DadDeals does not use Selenium, Playwright, proxy scraping, or browser automation because those approaches are heavier and more fragile on a Raspberry Pi 3 B.
+
+Phase 2A optionally uses Canopy API for Amazon URLs. Canopy provides structured Amazon product data by ASIN through a REST endpoint. DadDeals only uses it when you explicitly enable it.
+
+Create a Canopy API key:
+
+1. Go to `https://www.canopyapi.co/`.
+2. Create an account.
+3. Copy your API key from the Canopy dashboard.
+4. Put the key in your real `.env` file, not `.env.example`.
+
+Example `.env` settings:
+
+```text
+CANOPY_API_KEY=your_real_canopy_key_here
+ENABLE_CANOPY_AMAZON=true
+CANOPY_MONTHLY_LIMIT=100
+CANOPY_AUTH_HEADER=API-KEY
+AMAZON_CHECK_INTERVAL_HOURS=24
+```
+
+Use `CANOPY_AUTH_HEADER=API-KEY` unless your Canopy account/docs tell you to use bearer auth. If needed, set:
+
+```text
+CANOPY_AUTH_HEADER=Authorization
+```
+
+That sends:
+
+```text
+Authorization: Bearer <your key>
+```
+
+The default monthly budget is 100 requests. DadDeals tracks Canopy usage in SQLite in the `api_usage` table and will not make a Canopy request after the configured monthly limit is reached. When the limit is exhausted, Amazon checks are skipped with a friendly manual-check message.
+
+Recommended Amazon frequency:
+
+```text
+AMAZON_CHECK_INTERVAL_HOURS=24
+```
+
+Daily checks are a better fit than hourly checks because they preserve free-tier requests. If an Amazon item was checked recently, `worker.py --dry-run` will say it is not due yet. DadDeals avoids writing noisy skipped rows every hour.
+
+Do not create multiple Canopy accounts, rotate API keys, or try to bypass API limits. If you need more than the free budget, use the plan or limit that fits your real usage.
+
+To test Amazon ASIN extraction, add a product URL shaped like:
+
+```text
+https://www.amazon.com/dp/B08N5WRWNW
+```
+
+Then run:
+
+```bash
+python worker.py --dry-run
+python worker.py --run
+```
+
+If Canopy is disabled or missing a key, DadDeals saves a skipped Amazon check with a message telling you to open the product page manually. If Canopy is enabled and the item is due, `--run` calls Canopy, stores the returned price, and uses the same product alert logic as other product checks.
 
 ## Real Stock Checks
 
@@ -715,9 +783,17 @@ If a product URL cannot be checked:
 - Remember that some real retail sites block bots or load prices with JavaScript.
 - DadDeals does not use Selenium or Playwright in this phase to keep the Pi lightweight.
 
+If an Amazon URL cannot be checked:
+
+- Confirm the URL includes an ASIN, such as `/dp/B08N5WRWNW` or `/gp/product/B08N5WRWNW`.
+- Open Settings and confirm Canopy Amazon is enabled if you want automatic Amazon checks.
+- Confirm `.env` has a real `CANOPY_API_KEY`.
+- Confirm monthly usage has not reached `CANOPY_MONTHLY_LIMIT`.
+- Remember that Amazon automatic checks are skipped until the item is due again based on `AMAZON_CHECK_INTERVAL_HOURS`.
+
 ## Notes for Later Phases
 
-`worker.py` now uses exact-URL product checks and real yfinance stock checks. Later phases can add broader product search, recommendations, and more robust per-store handling.
+`worker.py` now uses exact-URL product checks, optional Canopy API checks for Amazon URLs, and real yfinance stock checks. Later phases can add broader product search, recommendations, and more robust per-store handling.
 
 Coming later:
 

@@ -243,6 +243,11 @@ button,
     color: #991b1b;
 }
 
+.status.skipped {
+    background: #e0f2fe;
+    color: #075985;
+}
+
 .status-stack {
     display: flex;
     flex-wrap: wrap;

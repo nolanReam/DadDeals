@@ -66,3 +66,12 @@ CREATE TABLE IF NOT EXISTS stock_checks (
     message TEXT,
     FOREIGN KEY (stock_id) REFERENCES tracked_stocks (id)
 );
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    usage_month TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    last_request_at TEXT,
+    UNIQUE (provider, usage_month)
+);

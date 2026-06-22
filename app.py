@@ -123,13 +123,14 @@ def schema_needs_upgrade():
         "alerts",
         "price_checks",
         "stock_checks",
+        "api_usage",
     }
     rows = db.execute(
         """
         SELECT name
         FROM sqlite_master
         WHERE type = 'table'
-          AND name IN (?, ?, ?, ?, ?)
+          AND name IN (?, ?, ?, ?, ?, ?)
         """,
         tuple(required_tables),
     ).fetchall()
@@ -344,6 +345,56 @@ def telegram_config_present():
     return token not in placeholder_values and chat_id not in placeholder_values
 
 
+def env_flag(name, default=False):
+    """Read a simple true/false environment flag."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name, default):
+    """Read a small positive integer setting with a safe fallback."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(value, 0)
+
+
+def canopy_status(db):
+    """Return Canopy settings and usage without exposing the API key."""
+    usage_month = datetime_month()
+    row = db.execute(
+        """
+        SELECT request_count
+        FROM api_usage
+        WHERE provider = 'canopy'
+          AND usage_month = ?
+        """,
+        (usage_month,),
+    ).fetchone()
+    monthly_limit = env_int("CANOPY_MONTHLY_LIMIT", 100)
+    api_key = os.environ.get("CANOPY_API_KEY", "").strip()
+    placeholder_values = {"", "replace_me", "replace_me_later"}
+    return {
+        "enabled": env_flag("ENABLE_CANOPY_AMAZON", False),
+        "api_key_present": api_key not in placeholder_values,
+        "auth_header": os.environ.get("CANOPY_AUTH_HEADER", "API-KEY").strip() or "API-KEY",
+        "usage_month": usage_month,
+        "request_count": row["request_count"] if row else 0,
+        "monthly_limit": monthly_limit,
+        "amazon_interval_hours": env_int("AMAZON_CHECK_INTERVAL_HOURS", 24),
+    }
+
+
+def datetime_month():
+    """Return the current calendar month key used for local API usage tracking."""
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y-%m")
+
+
 def latest_worker_run_time(db):
     """Use the newest check row as the last worker run time."""
     product_row = db.execute("SELECT MAX(checked_at) AS checked_at FROM price_checks").fetchone()
@@ -503,12 +554,13 @@ def register_routes(app):
         return render_template(
             "settings.html",
             page_title="Settings",
-            phase_label="DadDeals v1 - exact URL tracking",
+            phase_label="DadDeals v2A - Amazon Canopy support",
             telegram_ready=telegram_config_present(),
             database_path=database_path(),
             last_worker_run=latest_worker_run_time(db),
             worker_log=worker_log_summary(),
             alert_count=alert_count,
+            canopy=canopy_status(db),
         )
 
     @app.route("/alerts/clear-old", methods=["POST"])
