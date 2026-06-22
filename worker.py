@@ -1,20 +1,21 @@
-"""One-shot worker for DadDeals Phase 1D.
+"""One-shot worker for DadDeals Phase 1F.
 
-This file deliberately avoids background loops, product scraping, and
-heavyweight job systems. It reads active rows from SQLite, creates simulated
-product check history, creates real yfinance stock check history, creates local
+This file deliberately avoids background loops, browser automation, and
+heavyweight job systems. It reads active rows from SQLite, checks exact product
+URLs with requests and BeautifulSoup, checks stocks with yfinance, creates local
 alert records when thresholds are met, optionally sends unsent alerts through
 Telegram, prints a summary, and exits.
 """
 
 import argparse
-import hashlib
 import io
 import os
+import re
 import sqlite3
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -72,23 +73,126 @@ def migrate_alert_delivery_columns(db):
         )
 
 
-def stable_number(text):
-    """Return a repeatable number for the same input text."""
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16)
+class ProductFetchError(Exception):
+    """Friendly error for one product URL failure."""
 
 
-def fake_product_price(product):
-    """Create a deterministic simulated price near the product target.
+def product_source_name(url):
+    """Return a short source label for a product URL."""
+    host = urlparse(url).netloc
+    return host or "Exact URL checker"
 
-    Later phases will replace this with real product checking. For now, the
-    value is intentionally predictable so tests and demos are repeatable.
+
+def parse_price_text(text):
+    """Convert common price text into a float.
+
+    Handles examples such as "$199.99", "USD 199.99", "£51.77", and
+    "1,299.00". This is intentionally conservative because product pages vary.
     """
-    target_price = product["target_price"]
-    base_price = target_price if target_price is not None else 100.0
-    offsets = [-0.08, -0.03, 0.02, 0.06]
-    offset = offsets[stable_number(f"product:{product['id']}:{product['name']}") % 4]
-    return round(base_price * (1 + offset), 2)
+    if not text:
+        return None
+
+    normalized = " ".join(str(text).split())
+    pattern = r"(?:USD|US\$|[$£€])?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)"
+    for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+        raw_number = match.group(1).replace(",", "")
+        try:
+            price = float(raw_number)
+        except ValueError:
+            continue
+        if price > 0:
+            return round(price, 2)
+
+    return None
+
+
+def soup_from_html(html):
+    """Parse HTML with lxml when available, falling back to html.parser."""
+    from bs4 import BeautifulSoup, FeatureNotFound
+
+    try:
+        return BeautifulSoup(html, "lxml")
+    except FeatureNotFound:
+        return BeautifulSoup(html, "html.parser")
+
+
+def candidate_price_texts(soup):
+    """Yield likely price strings from common product-page patterns."""
+    selectors = [
+        'meta[property="product:price:amount"]',
+        'meta[itemprop="price"]',
+        '[itemprop="price"]',
+    ]
+
+    for selector in selectors:
+        for element in soup.select(selector):
+            content = element.get("content") or element.get("value")
+            text = content or element.get_text(" ", strip=True)
+            if text:
+                yield text
+
+    def has_price_word(value):
+        if not value:
+            return False
+        if isinstance(value, (list, tuple)):
+            value = " ".join(value)
+        value = str(value).lower()
+        return "price" in value
+
+    for element in soup.find_all(attrs={"class": has_price_word}):
+        text = element.get_text(" ", strip=True)
+        if text:
+            yield text
+
+    for element in soup.find_all(attrs={"id": has_price_word}):
+        text = element.get_text(" ", strip=True)
+        if text:
+            yield text
+
+
+def extract_price_from_html(html):
+    """Find the first plausible product price in an HTML document."""
+    soup = soup_from_html(html)
+    for text in candidate_price_texts(soup):
+        price = parse_price_text(text)
+        if price is not None:
+            return price
+    return None
+
+
+def fetch_product_price(url):
+    """Fetch one exact product URL and extract a product price."""
+    try:
+        import requests
+    except ImportError as error:
+        raise ProductFetchError(
+            "The requests package is missing. Run pip install -r requirements.txt."
+        ) from error
+
+    headers = {
+        "User-Agent": (
+            "DadDeals/1.0 personal exact-url price checker "
+            "(requests + BeautifulSoup)"
+        )
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.Timeout as error:
+        raise ProductFetchError("The product page timed out.") from error
+    except requests.RequestException as error:
+        raise ProductFetchError("Could not fetch the product page.") from error
+
+    if response.status_code >= 400:
+        raise ProductFetchError(
+            f"Product page returned HTTP {response.status_code}. Some sites block automated checks."
+        )
+
+    price = extract_price_from_html(response.text)
+    if price is None:
+        raise ProductFetchError("No product price was found on the page.")
+
+    return price
 
 
 def clean_ticker(ticker):
@@ -170,12 +274,14 @@ def fetch_stock_prices(ticker):
 
 
 def latest_product_price(db, product_id):
-    """Return the last recorded product price, or None if there is no history."""
+    """Return the last successful product price, or None if there is no history."""
     row = db.execute(
         """
         SELECT current_price
         FROM price_checks
         WHERE product_id = ?
+          AND status = 'ok'
+          AND current_price IS NOT NULL
         ORDER BY checked_at DESC, id DESC
         LIMIT 1
         """,
@@ -368,15 +474,49 @@ def send_unsent_alerts():
 
 
 def check_product(db, product, dry_run):
-    """Simulate one product check and return a small result dictionary."""
-    current_price = fake_product_price(product)
+    """Fetch and store one exact-URL product check."""
+    current_price = None
     previous_price = latest_product_price(db, product["id"])
-    if previous_price is None:
-        previous_price = round(current_price * 1.12, 2)
-
     messages = []
     alerts_created = 0
     target_price = product["target_price"]
+
+    try:
+        current_price = fetch_product_price(product["url"])
+        status = "ok"
+        check_message = "Exact URL product check completed."
+    except ProductFetchError as error:
+        status = "failed"
+        check_message = str(error)
+
+        if not dry_run:
+            db.execute(
+                """
+                INSERT INTO price_checks (
+                    product_id, source_name, current_price, previous_price,
+                    target_price, status, message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product["id"],
+                    product_source_name(product["url"]),
+                    current_price,
+                    previous_price,
+                    target_price,
+                    status,
+                    check_message,
+                ),
+            )
+
+        return {
+            "name": product["name"],
+            "current_price": current_price,
+            "previous_price": previous_price,
+            "alerts_created": 0,
+            "messages": [check_message],
+            "status": status,
+        }
 
     if not dry_run:
         db.execute(
@@ -389,12 +529,12 @@ def check_product(db, product, dry_run):
             """,
             (
                 product["id"],
-                "Phase 1D simulated product checker",
+                product_source_name(product["url"]),
                 current_price,
                 previous_price,
                 target_price,
-                "ok",
-                "Simulated product check completed.",
+                status,
+                check_message,
             ),
         )
 
@@ -409,7 +549,7 @@ def check_product(db, product, dry_run):
             alerts_created += 1
             messages.append(message)
 
-    if previous_price and product["big_drop_percent"] is not None:
+    if previous_price is not None and product["big_drop_percent"] is not None:
         drop_percent = ((previous_price - current_price) / previous_price) * 100
         if product["notify_on_big_drop"] and drop_percent >= product["big_drop_percent"]:
             title = f"Product big drop: {product['name']}"
@@ -427,6 +567,7 @@ def check_product(db, product, dry_run):
         "previous_price": previous_price,
         "alerts_created": alerts_created,
         "messages": messages,
+        "status": status,
     }
 
 
@@ -558,13 +699,24 @@ def run_worker(dry_run):
         mode = "DRY RUN" if dry_run else "RUN"
         print(f"DadDeals worker {mode} complete")
         print(f"Database: {database_path()}")
-        print(f"Products checked: {len(product_results)}")
+        print(f"Products checked with exact URLs: {len(product_results)}")
         for result in product_results:
-            print(
-                f"  - {result['name']}: ${result['current_price']:.2f} "
-                f"(previous ${result['previous_price']:.2f}), "
-                f"alerts: {result['alerts_created']}"
-            )
+            if result["status"] == "ok":
+                previous_text = (
+                    f"${result['previous_price']:.2f}"
+                    if result["previous_price"] is not None
+                    else "none"
+                )
+                print(
+                    f"  - {result['name']}: ${result['current_price']:.2f} "
+                    f"(previous {previous_text}), "
+                    f"alerts: {result['alerts_created']}"
+                )
+            else:
+                print(
+                    f"  - {result['name']}: check failed - "
+                    f"{result['messages'][0]}"
+                )
 
         print(f"Stocks checked with yfinance: {len(stock_results)}")
         for result in stock_results:

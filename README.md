@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1E adds Raspberry Pi cron scheduling support for the one-shot worker.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1F adds exact-URL product price checking with requests and BeautifulSoup.
 
-This phase does not include real product scraping, product APIs, recommendations, systemd web service setup, Nginx config, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, systemd web service setup, or Nginx config.
 
 ## Project Structure
 
@@ -45,7 +45,7 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
-This installs Flask, python-dotenv, requests, and yfinance.
+This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, and lxml.
 
 Create your real local `.env` file:
 
@@ -130,7 +130,7 @@ Install requirements:
 pip install -r requirements.txt
 ```
 
-This installs Flask, python-dotenv, requests, and yfinance.
+This installs Flask, python-dotenv, requests, yfinance, BeautifulSoup, and lxml.
 
 Create your real local `.env` file:
 
@@ -223,11 +223,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1E. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 1F. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1E uses simulated product data, real yfinance stock data, Telegram delivery, and optional cron scheduling. Real product checking still comes in a later phase.
+Phase 1F uses exact-URL product checks, real yfinance stock data, Telegram delivery, and optional cron scheduling. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -265,7 +265,40 @@ To view worker results:
 
 If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value.
 
-Daily rise percent is stored on stocks, but Phase 1E does not send rise alerts yet because the UI does not have a separate "notify on rise" setting. That is future work.
+Daily rise percent is stored on stocks, but Phase 1F does not send rise alerts yet because the UI does not have a separate "notify on rise" setting. That is future work.
+
+## Exact-URL Product Checks
+
+DadDeals checks only the exact product URL you save. It does not search other stores, compare multiple sellers, or use product recommendation APIs.
+
+Good test URL:
+
+```text
+https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
+```
+
+To test product checking:
+
+1. Add a product from the dashboard.
+2. Use the Books to Scrape URL above.
+3. Set a target price above the page price if you want to trigger a target alert.
+4. Run:
+
+```bash
+python worker.py --dry-run
+python worker.py --run
+```
+
+DadDeals looks for prices in common HTML patterns such as:
+
+- `meta[property="product:price:amount"]`
+- `meta[itemprop="price"]`
+- elements with `itemprop="price"`
+- class or id names containing `price`
+
+Real retail websites may not always work. Their HTML varies, some prices are loaded later with JavaScript, and some stores block simple automated requests. DadDeals does not use Selenium or Playwright in this phase because browser automation is heavy for a Raspberry Pi 3 B and more fragile to maintain.
+
+If a product page cannot be fetched or no price is found, DadDeals stores a failed price check and continues checking the other products and stocks.
 
 ## Real Stock Checks
 
@@ -286,7 +319,7 @@ Open the stock detail page to see:
 - check status
 - friendly failure message if the ticker could not be fetched
 
-Products are still simulated in Phase 1E. Only stock checks use yfinance.
+Products use exact-URL checks in Phase 1F. Stock checks use yfinance.
 
 ## Telegram Setup
 
@@ -426,7 +459,7 @@ If cron is not running, start it:
 sudo systemctl start cron
 ```
 
-Products are still simulated until a later phase. Cron runs the same worker command you run manually, so it creates simulated product checks, real yfinance stock checks, local alerts, and Telegram delivery attempts.
+Cron runs the same worker command you run manually, so it creates exact-URL product checks, real yfinance stock checks, local alerts, and Telegram delivery attempts.
 
 ## Manual Test Checklist
 
@@ -451,12 +484,14 @@ Products are still simulated until a later phase. Cron runs the same worker comm
 19. Run `python worker.py --run` and confirm it prints a summary with saved checks.
 20. Refresh the dashboard and confirm recent alerts appear if thresholds were met.
 21. Open product and stock detail pages and confirm recent check history appears.
-22. Add an invalid ticker and confirm the worker records a failed stock check without crashing.
-23. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
-24. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
-25. On the Pi, run `chmod +x scripts/run_worker.sh`.
-26. Run `./scripts/run_worker.sh` and confirm `logs/worker.log` gets timestamped start and end lines.
-27. Add one cron line with `crontab -e`, then confirm later runs appear in `logs/worker.log`.
+22. Add the Books to Scrape demo product URL and confirm the worker records a real price check.
+23. Add an invalid product URL and confirm the worker records a failed price check without crashing.
+24. Add an invalid ticker and confirm the worker records a failed stock check without crashing.
+25. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
+26. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
+27. On the Pi, run `chmod +x scripts/run_worker.sh`.
+28. Run `./scripts/run_worker.sh` and confirm `logs/worker.log` gets timestamped start and end lines.
+29. Add one cron line with `crontab -e`, then confirm later runs appear in `logs/worker.log`.
 
 ## Troubleshooting
 
@@ -491,6 +526,15 @@ If yfinance cannot fetch a ticker:
 - Check the stock detail page for the friendly failed-check message.
 - Some symbols, funds, or exchanges may need Yahoo Finance-specific ticker formats.
 
+If a product URL cannot be checked:
+
+- Confirm the URL starts with `http://` or `https://`.
+- Try the Books to Scrape demo URL first.
+- Confirm the Raspberry Pi or PC has internet access.
+- Check the product detail page for the friendly failed-check message.
+- Remember that some real retail sites block bots or load prices with JavaScript.
+- DadDeals does not use Selenium or Playwright in this phase to keep the Pi lightweight.
+
 ## Notes for Later Phases
 
-`worker.py` now uses real yfinance stock checks and simulated product checks. Later phases can replace the fake product values with real product checks and add scheduled background work.
+`worker.py` now uses exact-URL product checks and real yfinance stock checks. Later phases can add broader product search, recommendations, and more robust per-store handling.
