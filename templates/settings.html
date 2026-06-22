@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+    <div>
+        <h1>Settings</h1>
+        <p class="muted">{{ phase_label }}</p>
+    </div>
+    <a class="secondary-button" href="{{ url_for('dashboard') }}">Dashboard</a>
+</section>
+
+<section class="section">
+    <h2>Status</h2>
+    <div class="card-grid">
+        <article class="card">
+            <div class="card-top">
+                <h3>Telegram</h3>
+                {% if telegram_ready %}
+                    <span class="status active">Configured</span>
+                {% else %}
+                    <span class="status paused">Needs setup</span>
+                {% endif %}
+            </div>
+            <p class="muted">DadDeals checks for Telegram settings without showing secret values.</p>
+        </article>
+        <article class="card">
+            <h3>Database</h3>
+            <p class="muted break-text">{{ database_path }}</p>
+        </article>
+        <article class="card">
+            <h3>Last Worker Run</h3>
+            <p>{{ last_worker_run if last_worker_run else "No checks yet" }}</p>
+        </article>
+        <article class="card">
+            <h3>Alerts</h3>
+            <p>{{ alert_count }} alert(s) saved</p>
+        </article>
+    </div>
+</section>
+
+<section class="section">
+    <h2>Worker Log</h2>
+    {% if worker_log.exists %}
+        <div class="panel">
+            <p class="muted break-text">{{ worker_log.path }}</p>
+            <p>{{ worker_log.last_status }}</p>
+            <pre class="log-box">{% for line in worker_log.tail %}{{ line }}
+{% endfor %}</pre>
+        </div>
+    {% else %}
+        <div class="empty-state">No worker log yet. The cron script writes to logs/worker.log after it runs.</div>
+    {% endif %}
+</section>
+
+<section class="danger-zone">
+    <div class="danger-copy">
+        <h2>Clear Old Alerts</h2>
+        <p class="muted">This only deletes alert records. It does not delete products, stocks, price checks, or stock checks.</p>
+    </div>
+    <form class="stack" action="{{ url_for('clear_old_alerts') }}" method="post" data-confirm="Clear old alerts? Check history will stay saved.">
+        <label>
+            Clear alerts older than
+            <select name="days">
+                <option value="30">30 days</option>
+                <option value="60">60 days</option>
+                <option value="90">90 days</option>
+                <option value="7">7 days</option>
+                <option value="all">All alerts - extra confirmation required</option>
+            </select>
+        </label>
+        <label class="check-row">
+            <input type="checkbox" name="confirm">
+            I understand this deletes alert records only
+        </label>
+        <label class="check-row">
+            <input type="checkbox" name="confirm_all">
+            Also allow clearing all alerts if I selected "All alerts"
+        </label>
+        <button class="danger-button" type="submit">Clear Old Alerts</button>
+    </form>
+</section>
+{% endblock %}

@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1F adds exact-URL product price checking with requests and BeautifulSoup.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1G.1 adds alert management polish and source links for product price alerts.
 
-This phase does not include search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, systemd web service setup, or Nginx config.
+This phase does not include search-across-websites, recommendations, product APIs, Amazon-specific automation, Selenium, Playwright, Celery, Redis, Postgres, Docker, Gunicorn/systemd setup, or Nginx config.
 
 ## Project Structure
 
@@ -223,11 +223,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1F. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
+There is no reset command in Phase 1G.1. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1F uses exact-URL product checks, real yfinance stock data, Telegram delivery, and optional cron scheduling. Multi-site product search and recommendations still come in a later phase.
+Phase 1G.1 uses exact-URL product checks, real yfinance stock data, Telegram delivery, optional cron scheduling, simple reliability controls, and safer alert management. Multi-site product search and recommendations still come in a later phase.
 
 Preview one worker pass without saving rows:
 
@@ -247,6 +247,12 @@ Send existing unsent alert rows through Telegram:
 python worker.py --send-alerts
 ```
 
+Send one Telegram test message without creating an alert row:
+
+```bash
+python worker.py --test-telegram
+```
+
 Create checks and then send unsent alerts:
 
 ```bash
@@ -263,9 +269,40 @@ To view worker results:
 4. Open a product detail page to see recent price checks.
 5. Open a stock detail page to see recent stock checks.
 
-If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value.
+If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value. Product alerts include the exact product URL in the stored alert message, so the same source link appears on the dashboard and in Telegram.
 
-Daily rise percent is stored on stocks, but Phase 1F does not send rise alerts yet because the UI does not have a separate "notify on rise" setting. That is future work.
+Daily rise percent is stored on stocks, but Phase 1G does not send rise alerts yet because the UI does not have a separate "notify on rise" setting. That is future work.
+
+## Settings and Status
+
+Open `Settings` from the top bar after logging in.
+
+The settings page shows:
+
+- app phase label: `DadDeals v1 - exact URL tracking`
+- whether Telegram appears configured, without showing secrets
+- database path
+- last worker run time based on recent check rows
+- recent `logs/worker.log` status when cron has run
+- saved alert count
+
+The settings page also has a safe alert cleanup form. It deletes alert records only. It does not delete tracked products, tracked stocks, price checks, or stock checks.
+
+To clear old alerts:
+
+1. Open `Settings`.
+2. Choose an age, such as 30 days.
+3. Check the confirmation box.
+4. Press `Clear Old Alerts`.
+
+To clear all alerts from Settings, choose `All alerts - extra confirmation required`, check both confirmation boxes, and press `Clear Old Alerts`. This still does not delete product or stock check history.
+
+To delete recent alerts while testing:
+
+1. Open the dashboard.
+2. Press `Delete Alert` on one alert to remove only that alert.
+3. Or check several alerts, check the confirmation box under the alert list, and press `Delete Selected Alerts`.
+4. If no alerts are selected, DadDeals shows a friendly message and deletes nothing.
 
 ## Exact-URL Product Checks
 
@@ -300,6 +337,10 @@ Real retail websites may not always work. Their HTML varies, some prices are loa
 
 If a product page cannot be fetched or no price is found, DadDeals stores a failed price check and continues checking the other products and stocks.
 
+Amazon automatic scraping is not supported or reliable in v1. Amazon often blocks automated price checks, so DadDeals will still save an Amazon link, but you may need to check it manually or use a different store page.
+
+When a product target or big-drop alert is created, DadDeals stores the product URL in the alert message. The dashboard renders that URL as a clickable link, and Telegram receives the same source link.
+
 ## Real Stock Checks
 
 Add a stock such as `AAPL` from the dashboard, then run:
@@ -319,7 +360,7 @@ Open the stock detail page to see:
 - check status
 - friendly failure message if the ticker could not be fetched
 
-Products use exact-URL checks in Phase 1F. Stock checks use yfinance.
+Products use exact-URL checks in Phase 1G. Stock checks use yfinance.
 
 ## Telegram Setup
 
@@ -365,6 +406,12 @@ Or do both in one command:
 
 ```bash
 python worker.py --run --send-alerts
+```
+
+Test Telegram without creating an alert row:
+
+```bash
+python worker.py --test-telegram
 ```
 
 If Telegram settings are missing, the worker prints a friendly message and marks the delivery attempt as failed without crashing. After fixing `.env`, run `python worker.py --send-alerts` again.
@@ -461,6 +508,32 @@ sudo systemctl start cron
 
 Cron runs the same worker command you run manually, so it creates exact-URL product checks, real yfinance stock checks, local alerts, and Telegram delivery attempts.
 
+## Recommended First Real Test
+
+1. Add this product URL:
+
+```text
+https://books.toscrape.com/catalogue/a-light-in-the-attic_1000/index.html
+```
+
+2. Add a stock such as `AAPL`.
+3. Run:
+
+```bash
+python worker.py --dry-run
+python worker.py --run
+```
+
+4. Open the dashboard and confirm status badges are clear.
+5. Open the product detail page and confirm the price check appears.
+6. Open the stock detail page and confirm the yfinance check appears.
+7. Open `Settings` and confirm Telegram, database, worker, and alert status are readable.
+8. If Telegram is configured, run:
+
+```bash
+python worker.py --test-telegram
+```
+
 ## Manual Test Checklist
 
 1. Start the app with `python app.py`.
@@ -538,3 +611,11 @@ If a product URL cannot be checked:
 ## Notes for Later Phases
 
 `worker.py` now uses exact-URL product checks and real yfinance stock checks. Later phases can add broader product search, recommendations, and more robust per-store handling.
+
+Coming later:
+
+- better per-store product handling
+- optional search across multiple stores
+- recommendations
+- richer alert controls
+- more scheduling/deployment polish

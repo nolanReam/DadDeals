@@ -13,6 +13,12 @@
 </section>
 
 <section class="panel">
+    <h2>Check Now</h2>
+    <p class="muted">To check this product now, run the worker from the DadDeals folder. The web app does not run product checks directly, so the page stays quick on the Raspberry Pi.</p>
+    <code class="command-line">python worker.py --run</code>
+</section>
+
+<section class="panel">
     <dl class="details">
         <div>
             <dt>Product page</dt>
@@ -52,6 +58,11 @@
                         <span class="status {{ check.status }}">{{ check.status|title }}</span>
                     </div>
                     <p class="muted">{{ check.checked_at }} from {{ check.source_name }}</p>
+                    {% if check.source_url %}
+                        <p><a href="{{ check.source_url }}" target="_blank" rel="noopener">Open checked product page</a></p>
+                    {% else %}
+                        <p><a href="{{ product.url }}" target="_blank" rel="noopener">Open product page</a></p>
+                    {% endif %}
                     {% if check.status == "failed" %}
                         <p><span class="delivery-failed">Check failed</span></p>
                     {% else %}

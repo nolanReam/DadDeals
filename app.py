@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import sys
 from functools import wraps
@@ -17,6 +18,7 @@ from flask import (
     session,
     url_for,
 )
+from markupsafe import Markup, escape
 
 
 # Load settings from a local .env file if one exists.
@@ -46,6 +48,8 @@ def create_app():
     # Make sure the instance folder exists. Flask's instance folder is the
     # right place for local data that should not be committed, like SQLite DBs.
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
+
+    app.jinja_env.filters["linkify_urls"] = linkify_urls
 
     register_routes(app)
     register_cli_commands(app)
@@ -100,6 +104,7 @@ def init_db():
     with schema_file.open("r", encoding="utf-8") as file:
         db.executescript(file.read())
     migrate_alert_delivery_columns(db)
+    migrate_price_check_columns(db)
     db.commit()
 
 
@@ -132,7 +137,7 @@ def schema_needs_upgrade():
     if required_tables != existing_tables:
         return True
 
-    return alert_delivery_columns_missing(db)
+    return alert_delivery_columns_missing(db) or price_check_columns_missing(db)
 
 
 def alert_delivery_columns_missing(db):
@@ -162,6 +167,59 @@ def migrate_alert_delivery_columns(db):
         db.execute(
             "ALTER TABLE alerts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0"
         )
+
+
+def price_check_columns_missing(db):
+    """Return True when an older price_checks table needs Phase 1G.1 columns."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(price_checks)").fetchall()
+    }
+    return "source_url" not in existing_columns
+
+
+def migrate_price_check_columns(db):
+    """Add source URLs to older price check rows without deleting history."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(price_checks)").fetchall()
+    }
+
+    if "source_url" not in existing_columns:
+        db.execute("ALTER TABLE price_checks ADD COLUMN source_url TEXT")
+
+    db.execute(
+        """
+        UPDATE price_checks
+        SET source_url = (
+            SELECT tracked_products.url
+            FROM tracked_products
+            WHERE tracked_products.id = price_checks.product_id
+        )
+        WHERE source_url IS NULL
+        """
+    )
+
+
+def linkify_urls(value):
+    """Render plain alert text while turning http/https URLs into safe links."""
+    text = str(value or "")
+    pieces = []
+    last_index = 0
+
+    for match in re.finditer(r"https?://[^\s<]+", text):
+        pieces.append(escape(text[last_index : match.start()]))
+        url = match.group(0).rstrip(".,)")
+        trailing = match.group(0)[len(url) :]
+        safe_url = escape(url)
+        pieces.append(
+            Markup(
+                '<a href="{0}" target="_blank" rel="noopener">{0}</a>'
+            ).format(safe_url)
+        )
+        pieces.append(escape(trailing))
+        last_index = match.end()
+
+    pieces.append(escape(text[last_index:]))
+    return Markup("").join(pieces).replace("\n", Markup("<br>"))
 
 
 def login_required(view):
@@ -278,6 +336,106 @@ def flash_errors(errors):
         flash(error, "error")
 
 
+def telegram_config_present():
+    """Check whether Telegram settings look configured without showing values."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    placeholder_values = {"", "replace_me", "replace_me_later"}
+    return token not in placeholder_values and chat_id not in placeholder_values
+
+
+def latest_worker_run_time(db):
+    """Use the newest check row as the last worker run time."""
+    product_row = db.execute("SELECT MAX(checked_at) AS checked_at FROM price_checks").fetchone()
+    stock_row = db.execute("SELECT MAX(checked_at) AS checked_at FROM stock_checks").fetchone()
+    timestamps = [
+        row["checked_at"]
+        for row in (product_row, stock_row)
+        if row is not None and row["checked_at"]
+    ]
+    if not timestamps:
+        return None
+    return max(timestamps)
+
+
+def worker_log_summary():
+    """Read a small, safe summary from logs/worker.log if it exists."""
+    log_file = BASE_DIR / "logs" / "worker.log"
+    if not log_file.exists():
+        return {
+            "exists": False,
+            "path": str(log_file),
+            "last_modified": None,
+            "last_status": "No log yet",
+            "tail": [],
+        }
+
+    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    end_lines = [line for line in lines if "DadDeals worker end:" in line]
+    last_status = end_lines[-1] if end_lines else "Log exists, but no end line was found."
+    return {
+        "exists": True,
+        "path": str(log_file),
+        "last_modified": log_file.stat().st_mtime,
+        "last_status": last_status,
+        "tail": lines[-8:],
+    }
+
+
+def latest_check_statuses(db, table_name, id_column):
+    """Return latest check statuses keyed by product_id or stock_id."""
+    rows = db.execute(
+        f"""
+        SELECT checks.{id_column} AS item_id, checks.status
+        FROM {table_name} AS checks
+        JOIN (
+            SELECT {id_column}, MAX(id) AS latest_id
+            FROM {table_name}
+            GROUP BY {id_column}
+        ) AS latest
+          ON checks.id = latest.latest_id
+        """
+    ).fetchall()
+    return {row["item_id"]: row["status"] for row in rows}
+
+
+def target_hit_ids(db, item_type):
+    """Return item ids that have ever had a target-hit alert."""
+    rows = db.execute(
+        """
+        SELECT DISTINCT item_id
+        FROM alerts
+        WHERE item_type = ?
+          AND title LIKE ?
+        """,
+        (item_type, "%target hit:%"),
+    ).fetchall()
+    return {row["item_id"] for row in rows if row["item_id"] is not None}
+
+
+def status_label(item, latest_status, target_hits):
+    """Choose one simple Dad-friendly status label."""
+    if item["status"] == "paused":
+        return "Paused", "paused"
+    if latest_status == "failed":
+        return "Last check failed", "failed"
+    if item["id"] in target_hits:
+        return "Target hit", "target-hit"
+    return "Watching", "watching"
+
+
+def decorate_items(rows, latest_statuses, target_hits):
+    """Convert sqlite rows to dicts with a display status."""
+    decorated = []
+    for row in rows:
+        item = dict(row)
+        label, css_class = status_label(item, latest_statuses.get(item["id"]), target_hits)
+        item["display_status"] = label
+        item["display_status_class"] = css_class
+        decorated.append(item)
+    return decorated
+
+
 def register_cli_commands(app):
     @app.cli.command("init-db")
     def init_db_command():
@@ -310,12 +468,22 @@ def register_routes(app):
     @login_required
     def dashboard():
         db = get_db()
-        products = db.execute(
+        product_rows = db.execute(
             "SELECT * FROM tracked_products ORDER BY created_at DESC"
         ).fetchall()
-        stocks = db.execute(
+        stock_rows = db.execute(
             "SELECT * FROM tracked_stocks ORDER BY created_at DESC"
         ).fetchall()
+        products = decorate_items(
+            product_rows,
+            latest_check_statuses(db, "price_checks", "product_id"),
+            target_hit_ids(db, "product"),
+        )
+        stocks = decorate_items(
+            stock_rows,
+            latest_check_statuses(db, "stock_checks", "stock_id"),
+            target_hit_ids(db, "stock"),
+        )
         alerts = db.execute(
             "SELECT * FROM alerts ORDER BY created_at DESC LIMIT 10"
         ).fetchall()
@@ -326,6 +494,110 @@ def register_routes(app):
             alerts=alerts,
             page_title="Dashboard",
         )
+
+    @app.route("/settings")
+    @login_required
+    def settings():
+        db = get_db()
+        alert_count = db.execute("SELECT COUNT(*) AS count FROM alerts").fetchone()["count"]
+        return render_template(
+            "settings.html",
+            page_title="Settings",
+            phase_label="DadDeals v1 - exact URL tracking",
+            telegram_ready=telegram_config_present(),
+            database_path=database_path(),
+            last_worker_run=latest_worker_run_time(db),
+            worker_log=worker_log_summary(),
+            alert_count=alert_count,
+        )
+
+    @app.route("/alerts/clear-old", methods=["POST"])
+    @login_required
+    def clear_old_alerts():
+        days_value = request.form.get("days", "30")
+
+        if request.form.get("confirm") != "on":
+            flash("Check the confirmation box before clearing old alerts.", "error")
+            return redirect(url_for("settings"))
+
+        db = get_db()
+
+        if days_value == "all":
+            if request.form.get("confirm_all") != "on":
+                flash("Check the extra confirmation box before clearing all alerts.", "error")
+                return redirect(url_for("settings"))
+
+            result = db.execute("DELETE FROM alerts")
+            db.commit()
+            flash(
+                f"Cleared all {result.rowcount} alert record(s). Check history stayed saved.",
+                "success",
+            )
+            return redirect(url_for("settings"))
+
+        try:
+            days = int(days_value)
+        except ValueError:
+            days = 30
+
+        if days not in {7, 30, 60, 90}:
+            flash("Choose a valid alert cleanup age.", "error")
+            return redirect(url_for("settings"))
+
+        result = db.execute(
+            "DELETE FROM alerts WHERE created_at < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        db.commit()
+        flash(f"Cleared {result.rowcount} alert(s) older than {days} days.", "success")
+        return redirect(url_for("settings"))
+
+    @app.route("/alerts/<int:alert_id>/delete", methods=["POST"])
+    @login_required
+    def delete_alert(alert_id):
+        """Delete one alert row while leaving check history alone."""
+        db = get_db()
+        result = db.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+        db.commit()
+
+        if result.rowcount:
+            flash("Alert deleted. Product and stock check history stayed saved.", "success")
+        else:
+            flash("That alert was already gone.", "error")
+
+        return redirect(url_for("dashboard"))
+
+    @app.route("/alerts/delete-selected", methods=["POST"])
+    @login_required
+    def delete_selected_alerts():
+        """Delete selected alert rows from the dashboard."""
+        selected_ids = request.form.getlist("alert_ids")
+        if not selected_ids:
+            flash("Choose at least one alert before pressing Delete Selected Alerts.", "error")
+            return redirect(url_for("dashboard"))
+
+        if request.form.get("confirm_selected") != "on":
+            flash("Check the confirmation box before deleting selected alerts.", "error")
+            return redirect(url_for("dashboard"))
+
+        try:
+            alert_ids = [int(alert_id) for alert_id in selected_ids]
+        except ValueError:
+            flash("One selected alert was not valid. Nothing was deleted.", "error")
+            return redirect(url_for("dashboard"))
+
+        placeholders = ",".join("?" for _ in alert_ids)
+        db = get_db()
+        result = db.execute(
+            f"DELETE FROM alerts WHERE id IN ({placeholders})",
+            alert_ids,
+        )
+        db.commit()
+        flash(
+            f"Deleted {result.rowcount} selected alert(s). Check history stayed saved.",
+            "success",
+        )
+        return redirect(url_for("dashboard"))
 
     @app.route("/products/add", methods=["GET", "POST"])
     @login_required

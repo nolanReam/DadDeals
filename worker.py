@@ -1,4 +1,4 @@
-"""One-shot worker for DadDeals Phase 1F.
+"""One-shot worker for DadDeals Phase 1G.
 
 This file deliberately avoids background loops, browser automation, and
 heavyweight job systems. It reads active rows from SQLite, checks exact product
@@ -12,6 +12,7 @@ import io
 import os
 import re
 import sqlite3
+import sys
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -50,6 +51,7 @@ def init_db(db):
     with SCHEMA_PATH.open("r", encoding="utf-8") as file:
         db.executescript(file.read())
     migrate_alert_delivery_columns(db)
+    migrate_price_check_columns(db)
     db.commit()
 
 
@@ -71,6 +73,28 @@ def migrate_alert_delivery_columns(db):
         db.execute(
             "ALTER TABLE alerts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0"
         )
+
+
+def migrate_price_check_columns(db):
+    """Add Phase 1G.1 source URL storage to older databases."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(price_checks)").fetchall()
+    }
+
+    if "source_url" not in existing_columns:
+        db.execute("ALTER TABLE price_checks ADD COLUMN source_url TEXT")
+
+    db.execute(
+        """
+        UPDATE price_checks
+        SET source_url = (
+            SELECT tracked_products.url
+            FROM tracked_products
+            WHERE tracked_products.id = price_checks.product_id
+        )
+        WHERE source_url IS NULL
+        """
+    )
 
 
 class ProductFetchError(Exception):
@@ -340,6 +364,11 @@ def target_alert_message(label, current_price, target_price):
     )
 
 
+def product_source_alert_message(message, source_url):
+    """Add the exact product page to stored product alert text."""
+    return f"{message}\nSource: {source_url}"
+
+
 def telegram_settings():
     """Read Telegram settings from .env/environment."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -473,6 +502,17 @@ def send_unsent_alerts():
         db.close()
 
 
+def test_telegram():
+    """Send one direct Telegram test message without creating an alert row."""
+    ok, error = send_telegram_message("DadDeals Telegram test message.")
+    if ok:
+        print("Telegram test message sent.")
+        return True
+
+    print(f"Telegram test failed: {error}")
+    return False
+
+
 def check_product(db, product, dry_run):
     """Fetch and store one exact-URL product check."""
     current_price = None
@@ -493,14 +533,15 @@ def check_product(db, product, dry_run):
             db.execute(
                 """
                 INSERT INTO price_checks (
-                    product_id, source_name, current_price, previous_price,
+                    product_id, source_name, source_url, current_price, previous_price,
                     target_price, status, message
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     product["id"],
                     product_source_name(product["url"]),
+                    product["url"],
                     current_price,
                     previous_price,
                     target_price,
@@ -522,14 +563,15 @@ def check_product(db, product, dry_run):
         db.execute(
             """
             INSERT INTO price_checks (
-                product_id, source_name, current_price, previous_price,
+                product_id, source_name, source_url, current_price, previous_price,
                 target_price, status, message
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 product["id"],
                 product_source_name(product["url"]),
+                product["url"],
                 current_price,
                 previous_price,
                 target_price,
@@ -544,7 +586,10 @@ def check_product(db, product, dry_run):
         and current_price <= target_price
     ):
         title = f"Product target hit: {product['name']}"
-        message = target_alert_message(product["name"], current_price, target_price)
+        message = product_source_alert_message(
+            target_alert_message(product["name"], current_price, target_price),
+            product["url"],
+        )
         if create_alert(db, "product", product["id"], title, message, dry_run):
             alerts_created += 1
             messages.append(message)
@@ -557,6 +602,7 @@ def check_product(db, product, dry_run):
                 f"{product['name']} dropped {drop_percent:.1f}% "
                 f"to ${current_price:.2f}."
             )
+            message = product_source_alert_message(message, product["url"])
             if create_alert(db, "product", product["id"], title, message, dry_run):
                 alerts_created += 1
                 messages.append(message)
@@ -742,14 +788,19 @@ def run_worker(dry_run):
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the DadDeals simulated worker once.")
     parser.add_argument("--dry-run", action="store_true", help="Preview checks without saving.")
-    parser.add_argument("--run", action="store_true", help="Save simulated checks and alerts.")
+    parser.add_argument("--run", action="store_true", help="Save product/stock checks and alerts.")
     parser.add_argument("--send-alerts", action="store_true", help="Send unsent Telegram alerts.")
+    parser.add_argument("--test-telegram", action="store_true", help="Send one Telegram test message.")
     args = parser.parse_args()
 
-    if args.dry_run and (args.run or args.send_alerts):
-        parser.error("--dry-run cannot be combined with --run or --send-alerts.")
-    if not args.dry_run and not args.run and not args.send_alerts:
-        parser.error("Choose --dry-run, --run, --send-alerts, or --run --send-alerts.")
+    if args.dry_run and (args.run or args.send_alerts or args.test_telegram):
+        parser.error("--dry-run cannot be combined with other worker actions.")
+    if args.test_telegram and (args.run or args.send_alerts):
+        parser.error("--test-telegram must be run by itself.")
+    if not args.dry_run and not args.run and not args.send_alerts and not args.test_telegram:
+        parser.error(
+            "Choose --dry-run, --run, --send-alerts, --run --send-alerts, or --test-telegram."
+        )
 
     return args
 
@@ -759,6 +810,9 @@ def main():
     if args.dry_run:
         run_worker(dry_run=True)
         return
+
+    if args.test_telegram:
+        sys.exit(0 if test_telegram() else 1)
 
     if args.run:
         run_worker(dry_run=False)

@@ -52,6 +52,12 @@ a {
     text-decoration: none;
 }
 
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .page {
     width: min(100%, 980px);
     margin: 0 auto;
@@ -222,9 +228,26 @@ button,
     color: #991b1b;
 }
 
+.status.watching {
+    background: #dbeafe;
+    color: #1e40af;
+}
+
+.status.target-hit {
+    background: #fef3c7;
+    color: #92400e;
+}
+
 .status.failed {
     background: #fee2e2;
     color: #991b1b;
+}
+
+.status-stack {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
 }
 
 .status.delivery-sent {
@@ -252,9 +275,67 @@ button,
     font-weight: 800;
 }
 
+.alert-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 0.95rem;
+    font-weight: 750;
+}
+
+.alert-select input {
+    width: 22px;
+    min-height: 22px;
+}
+
+.alert-bulk-actions {
+    display: grid;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.message-text {
+    overflow-wrap: anywhere;
+}
+
 .stack {
     display: grid;
     gap: 14px;
+}
+
+.helper-box {
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    background: #eef7fb;
+    padding: 12px 14px;
+    color: #24485a;
+    font-size: 0.95rem;
+}
+
+.command-line {
+    display: block;
+    overflow-x: auto;
+    border-radius: 8px;
+    background: #111827;
+    color: #f8fafc;
+    padding: 12px 14px;
+}
+
+.break-text {
+    overflow-wrap: anywhere;
+}
+
+.log-box {
+    overflow-x: auto;
+    margin: 0;
+    border-radius: 8px;
+    background: #111827;
+    color: #f8fafc;
+    padding: 12px;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
 }
 
 label {

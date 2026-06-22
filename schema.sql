@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS price_checks (
     product_id INTEGER NOT NULL,
     checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_name TEXT NOT NULL,
+    source_url TEXT,
     current_price REAL,
     previous_price REAL,
     target_price REAL,

@@ -12,6 +12,9 @@
             Product page URL
             <input type="url" name="url" value="{{ form.get('url', '') }}" placeholder="https://example.com/item" pattern="https?://.+" required>
         </label>
+        <div class="helper-box">
+            Exact product pages work best. Some sites block automated checks. If a site fails, try a different store page. Amazon pages may not work reliably because Amazon often blocks automated price checks. If an Amazon link fails, DadDeals will still save the link, but you may need to check it manually or use a different store page.
+        </div>
         <label>
             Target price
             <input type="number" step="0.01" min="0" name="target_price" value="{{ form.get('target_price', '') if form.get('target_price') is not none }}" placeholder="Example: 49.99">
