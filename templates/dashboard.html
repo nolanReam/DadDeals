@@ -68,9 +68,14 @@
                 <article class="card">
                     <div class="card-top">
                         <h3>{{ alert.title }}</h3>
-                        <span class="status">{{ alert.alert_status|title }}</span>
+                        <span class="status delivery-{{ alert.delivery_status or 'unsent' }}">
+                            {{ (alert.delivery_status or "unsent")|title }}
+                        </span>
                     </div>
                     <p>{{ alert.message }}</p>
+                    {% if alert.delivery_status == "failed" %}
+                        <p><span class="delivery-failed">Delivery failed</span></p>
+                    {% endif %}
                     <p class="muted">{{ alert.created_at }}</p>
                 </article>
             {% endfor %}

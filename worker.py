@@ -1,9 +1,9 @@
-"""One-shot simulated worker for DadDeals Phase 1B.
+"""One-shot simulated worker for DadDeals Phase 1C.
 
-This file deliberately avoids network calls, background loops, Telegram,
-yfinance, scraping, and heavyweight dependencies. It reads active rows from
-SQLite, creates simulated check history, creates local alert records when
-simple thresholds are met, prints a summary, and exits.
+This file deliberately avoids background loops, yfinance, scraping, and
+heavyweight dependencies. It reads active rows from SQLite, creates simulated
+check history, creates local alert records when simple thresholds are met,
+optionally sends unsent alerts through Telegram, prints a summary, and exits.
 """
 
 import argparse
@@ -45,7 +45,28 @@ def init_db(db):
     """Create any missing tables without deleting existing data."""
     with SCHEMA_PATH.open("r", encoding="utf-8") as file:
         db.executescript(file.read())
+    migrate_alert_delivery_columns(db)
     db.commit()
+
+
+def migrate_alert_delivery_columns(db):
+    """Add Phase 1C alert delivery columns to older databases."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(alerts)").fetchall()
+    }
+
+    if "sent_at" not in existing_columns:
+        db.execute("ALTER TABLE alerts ADD COLUMN sent_at TEXT")
+    if "delivery_status" not in existing_columns:
+        db.execute(
+            "ALTER TABLE alerts ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'unsent'"
+        )
+    if "delivery_error" not in existing_columns:
+        db.execute("ALTER TABLE alerts ADD COLUMN delivery_error TEXT")
+    if "delivery_attempts" not in existing_columns:
+        db.execute(
+            "ALTER TABLE alerts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def stable_number(text):
@@ -140,12 +161,147 @@ def create_alert(db, item_type, item_id, title, message, dry_run):
 
     db.execute(
         """
-        INSERT INTO alerts (item_type, item_id, title, message, alert_status)
-        VALUES (?, ?, ?, ?, 'new')
+        INSERT INTO alerts (
+            item_type, item_id, title, message, alert_status, delivery_status
+        )
+        VALUES (?, ?, ?, ?, 'new', 'unsent')
         """,
         (item_type, item_id, title, message),
     )
     return True
+
+
+def telegram_settings():
+    """Read Telegram settings from .env/environment."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if token in {"replace_me_later", "replace_me"}:
+        token = ""
+    if chat_id in {"replace_me_later", "replace_me"}:
+        chat_id = ""
+    return token, chat_id
+
+
+def short_error(message):
+    """Keep delivery errors short and safe for storage."""
+    return message.replace("\n", " ").strip()[:180]
+
+
+def send_telegram_message(text):
+    """Send one Telegram message with a timeout.
+
+    The bot token is only used inside the request URL. Error messages returned
+    from this function are intentionally generic so secrets do not end up in
+    the database or dashboard.
+    """
+    token, chat_id = telegram_settings()
+    if not token or not chat_id:
+        return False, "Telegram is not configured. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to .env."
+
+    try:
+        import requests
+    except ImportError:
+        return False, "The requests package is missing. Run pip install -r requirements.txt."
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+
+    try:
+        response = requests.post(url, data=payload, timeout=10)
+    except requests.RequestException:
+        return False, "Network error while contacting Telegram."
+
+    if response.status_code != 200:
+        return False, f"Telegram API returned HTTP {response.status_code}."
+
+    try:
+        data = response.json()
+    except ValueError:
+        return False, "Telegram returned an invalid response."
+
+    if not data.get("ok"):
+        description = data.get("description") or "Telegram rejected the message."
+        return False, short_error(description)
+
+    return True, None
+
+
+def alert_text(alert):
+    """Format a simple Telegram message for one alert row."""
+    return f"DadDeals alert\n\n{alert['title']}\n{alert['message']}"
+
+
+def mark_alert_sent(db, alert_id):
+    """Mark an alert as delivered."""
+    db.execute(
+        """
+        UPDATE alerts
+        SET delivery_status = 'sent',
+            sent_at = CURRENT_TIMESTAMP,
+            delivery_error = NULL,
+            delivery_attempts = delivery_attempts + 1
+        WHERE id = ?
+        """,
+        (alert_id,),
+    )
+
+
+def mark_alert_failed(db, alert_id, error):
+    """Mark an alert delivery attempt as failed without exposing secrets."""
+    db.execute(
+        """
+        UPDATE alerts
+        SET delivery_status = 'failed',
+            delivery_error = ?,
+            delivery_attempts = delivery_attempts + 1
+        WHERE id = ?
+        """,
+        (short_error(error), alert_id),
+    )
+
+
+def send_unsent_alerts():
+    """Send all alerts that have not been successfully delivered yet."""
+    db = connect_db()
+    try:
+        init_db(db)
+        alerts = db.execute(
+            """
+            SELECT *
+            FROM alerts
+            WHERE sent_at IS NULL
+              AND COALESCE(delivery_status, 'unsent') != 'sent'
+            ORDER BY created_at ASC, id ASC
+            """
+        ).fetchall()
+
+        sent_count = 0
+        failed_count = 0
+
+        print("DadDeals Telegram delivery starting")
+        print(f"Unsent alerts found: {len(alerts)}")
+
+        if not alerts:
+            print("No Telegram messages to send.")
+            return {"sent": 0, "failed": 0, "total": 0}
+
+        for alert in alerts:
+            ok, error = send_telegram_message(alert_text(alert))
+            if ok:
+                mark_alert_sent(db, alert["id"])
+                sent_count += 1
+                print(f"  - Sent alert #{alert['id']}: {alert['title']}")
+            else:
+                mark_alert_failed(db, alert["id"], error)
+                failed_count += 1
+                print(f"  - Could not send alert #{alert['id']}: {error}")
+
+        db.commit()
+        print(f"Telegram sent: {sent_count}")
+        print(f"Telegram failed: {failed_count}")
+        return {"sent": sent_count, "failed": failed_count, "total": len(alerts)}
+    finally:
+        db.close()
 
 
 def check_product(db, product, dry_run):
@@ -331,15 +487,30 @@ def run_worker(dry_run):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the DadDeals simulated worker once.")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--dry-run", action="store_true", help="Preview checks without saving.")
-    group.add_argument("--run", action="store_true", help="Save simulated checks and alerts.")
-    return parser.parse_args()
+    parser.add_argument("--dry-run", action="store_true", help="Preview checks without saving.")
+    parser.add_argument("--run", action="store_true", help="Save simulated checks and alerts.")
+    parser.add_argument("--send-alerts", action="store_true", help="Send unsent Telegram alerts.")
+    args = parser.parse_args()
+
+    if args.dry_run and (args.run or args.send_alerts):
+        parser.error("--dry-run cannot be combined with --run or --send-alerts.")
+    if not args.dry_run and not args.run and not args.send_alerts:
+        parser.error("Choose --dry-run, --run, --send-alerts, or --run --send-alerts.")
+
+    return args
 
 
 def main():
     args = parse_args()
-    run_worker(dry_run=args.dry_run)
+    if args.dry_run:
+        run_worker(dry_run=True)
+        return
+
+    if args.run:
+        run_worker(dry_run=False)
+
+    if args.send_alerts:
+        send_unsent_alerts()
 
 
 if __name__ == "__main__":

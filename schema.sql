@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS alerts (
     message TEXT NOT NULL,
     alert_status TEXT NOT NULL DEFAULT 'new',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    sent_at TEXT
+    sent_at TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'unsent',
+    delivery_error TEXT,
+    delivery_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS price_checks (

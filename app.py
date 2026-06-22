@@ -99,17 +99,18 @@ def init_db():
     db = get_db()
     with schema_file.open("r", encoding="utf-8") as file:
         db.executescript(file.read())
+    migrate_alert_delivery_columns(db)
     db.commit()
 
 
 def ensure_database():
-    """Initialize the database if the file or Phase 1B tables are missing."""
-    if not database_path().exists() or schema_tables_missing():
+    """Initialize the database if the file or required tables/columns are missing."""
+    if not database_path().exists() or schema_needs_upgrade():
         init_db()
 
 
-def schema_tables_missing():
-    """Check for required tables without changing existing user data."""
+def schema_needs_upgrade():
+    """Check for required tables and alert delivery columns."""
     db = get_db()
     required_tables = {
         "tracked_products",
@@ -128,7 +129,39 @@ def schema_tables_missing():
         tuple(required_tables),
     ).fetchall()
     existing_tables = {row["name"] for row in rows}
-    return required_tables != existing_tables
+    if required_tables != existing_tables:
+        return True
+
+    return alert_delivery_columns_missing(db)
+
+
+def alert_delivery_columns_missing(db):
+    """Return True when an older alerts table needs Phase 1C columns."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(alerts)").fetchall()
+    }
+    required_columns = {"sent_at", "delivery_status", "delivery_error", "delivery_attempts"}
+    return not required_columns.issubset(existing_columns)
+
+
+def migrate_alert_delivery_columns(db):
+    """Add Phase 1C alert delivery columns without touching existing rows."""
+    existing_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(alerts)").fetchall()
+    }
+
+    if "sent_at" not in existing_columns:
+        db.execute("ALTER TABLE alerts ADD COLUMN sent_at TEXT")
+    if "delivery_status" not in existing_columns:
+        db.execute(
+            "ALTER TABLE alerts ADD COLUMN delivery_status TEXT NOT NULL DEFAULT 'unsent'"
+        )
+    if "delivery_error" not in existing_columns:
+        db.execute("ALTER TABLE alerts ADD COLUMN delivery_error TEXT")
+    if "delivery_attempts" not in existing_columns:
+        db.execute(
+            "ALTER TABLE alerts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def login_required(view):

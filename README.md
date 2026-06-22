@@ -1,8 +1,8 @@
 # DadDeals
 
-DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1B adds a safe one-shot worker foundation that creates simulated product and stock check history.
+DadDeals is a small local Flask dashboard for tracking products and stocks. Phase 1C adds Telegram delivery for alert rows created by the one-shot worker.
 
-This phase does not include scraping, yfinance, real stock downloads, Telegram sending, cron jobs, infinite background loops, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
+This phase does not include scraping, yfinance, real stock downloads, cron jobs, infinite background loops, APIs, recommendations, Docker, Redis, Celery, Postgres, Selenium, or Playwright.
 
 ## Project Structure
 
@@ -58,9 +58,11 @@ ADMIN_PASSWORD=choose_a_password_for_the_dashboard
 DATABASE_PATH=instance/daddeals.db
 HOST=0.0.0.0
 PORT=5000
+TELEGRAM_BOT_TOKEN=replace_me_later
+TELEGRAM_CHAT_ID=replace_me_later
 ```
 
-The Telegram values stay as placeholders for now.
+Leave the Telegram values as placeholders until you are ready to test message delivery.
 
 Initialize the database:
 
@@ -80,6 +82,18 @@ Run one simulated worker pass and save check history plus alerts:
 
 ```powershell
 python worker.py --run
+```
+
+Send unsent alerts through Telegram after you fill in the Telegram settings:
+
+```powershell
+python worker.py --send-alerts
+```
+
+Run simulated checks and send any new unsent alerts in one command:
+
+```powershell
+python worker.py --run --send-alerts
 ```
 
 Run the app:
@@ -151,6 +165,18 @@ Run one simulated worker pass and save check history plus alerts:
 python worker.py --run
 ```
 
+Send unsent alerts through Telegram after you fill in the Telegram settings:
+
+```bash
+python worker.py --send-alerts
+```
+
+Run simulated checks and send any new unsent alerts in one command:
+
+```bash
+python worker.py --run --send-alerts
+```
+
 Run the app:
 
 ```bash
@@ -185,11 +211,11 @@ Initialize or update missing tables without deleting data:
 python app.py --init-db
 ```
 
-There is no reset command in Phase 1B. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, or alerts.
+There is no reset command in Phase 1C. That is intentional, so a beginner command cannot accidentally wipe saved products, stocks, checks, alerts, or delivery history.
 
 ## Worker Commands
 
-Phase 1B uses simulated data only. The worker does not scrape product pages, does not call yfinance, and does not send Telegram messages. Real product checking and real stock checking come in later phases.
+Phase 1C still uses simulated product and stock data only. The worker does not scrape product pages and does not call yfinance. Real product checking and real stock checking come in later phases.
 
 Preview one worker pass without saving rows:
 
@@ -203,6 +229,18 @@ Run one worker pass and save rows:
 python worker.py --run
 ```
 
+Send existing unsent alert rows through Telegram:
+
+```bash
+python worker.py --send-alerts
+```
+
+Create simulated alerts and then send unsent alerts:
+
+```bash
+python worker.py --run --send-alerts
+```
+
 The worker runs once and exits. It reads active products and stocks from SQLite, inserts rows into `price_checks` and `stock_checks`, and creates local rows in `alerts` when simulated values meet your saved thresholds.
 
 To view worker results:
@@ -213,7 +251,57 @@ To view worker results:
 4. Open a product detail page to see recent price checks.
 5. Open a stock detail page to see recent stock checks.
 
-If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over.
+If you run the worker repeatedly on the same day, DadDeals avoids creating the exact same alert over and over. Telegram delivery also skips alerts that already have a `sent_at` value.
+
+## Telegram Setup
+
+DadDeals uses Telegram only when you run `python worker.py --send-alerts` or `python worker.py --run --send-alerts`.
+
+Create a bot:
+
+1. Open Telegram and search for `BotFather`.
+2. Start a chat with BotFather.
+3. Send `/newbot`.
+4. Follow the prompts to choose a bot name and username.
+5. BotFather will give you a bot token. Put that value in `.env` as `TELEGRAM_BOT_TOKEN`.
+
+Get your chat ID:
+
+1. Start a Telegram chat with your new bot and send it any message, such as `hello`.
+2. In a browser, open this URL after replacing `<token>` with your bot token:
+
+```text
+https://api.telegram.org/bot<token>/getUpdates
+```
+
+3. Look for the `chat` object and copy its `id` value.
+4. Put that value in `.env` as `TELEGRAM_CHAT_ID`.
+
+Your `.env` should include:
+
+```text
+TELEGRAM_BOT_TOKEN=your_real_bot_token_here
+TELEGRAM_CHAT_ID=your_real_chat_id_here
+```
+
+Do not put real Telegram values in `.env.example`.
+
+Test Telegram delivery:
+
+```bash
+python worker.py --run
+python worker.py --send-alerts
+```
+
+Or do both in one command:
+
+```bash
+python worker.py --run --send-alerts
+```
+
+If Telegram settings are missing, the worker prints a friendly message and marks the delivery attempt as failed without crashing. After fixing `.env`, run `python worker.py --send-alerts` again.
+
+Cron and automatic scheduling come in a later phase. For now, run the worker command manually when you want checks or deliveries.
 
 ## Manual Test Checklist
 
@@ -237,6 +325,8 @@ If you run the worker repeatedly on the same day, DadDeals avoids creating the e
 18. Run `python worker.py --run` and confirm it prints a summary with saved checks.
 19. Refresh the dashboard and confirm recent alerts appear if simulated thresholds were met.
 20. Open product and stock detail pages and confirm recent check history appears.
+21. Run `python worker.py --send-alerts` without Telegram settings and confirm it fails gracefully.
+22. Add real Telegram settings to `.env`, run `python worker.py --send-alerts`, and confirm sent alerts show as sent on the dashboard.
 
 ## Troubleshooting
 
@@ -256,6 +346,13 @@ python app.py --init-db
 
 If login does not work, check `ADMIN_PASSWORD` in `.env`.
 
+If Telegram delivery says it is not configured:
+
+- Confirm `.env` has real `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` values.
+- Confirm the values are not still `replace_me_later`.
+- Send one message to your bot before using `getUpdates`.
+- Run `python worker.py --send-alerts` again after editing `.env`.
+
 ## Notes for Later Phases
 
-`worker.py` is a simulated foundation in Phase 1B. Later phases can replace the fake check values with real product checks, yfinance stock checks, Telegram alerts, and scheduled background work.
+`worker.py` is a simulated checking and Telegram delivery foundation in Phase 1C. Later phases can replace the fake check values with real product checks, yfinance stock checks, and scheduled background work.
